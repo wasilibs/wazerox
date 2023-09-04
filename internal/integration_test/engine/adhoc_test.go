@@ -111,7 +111,9 @@ func runAllTests(t *testing.T, tests map[string]testCase, config wazero.RuntimeC
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			tc.f(t, wazero.NewRuntimeWithConfig(testCtx, config))
+			r := wazero.NewRuntimeWithConfig(testCtx, config)
+			defer r.Close(testCtx)
+			tc.f(t, r)
 		})
 	}
 }

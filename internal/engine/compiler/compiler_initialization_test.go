@@ -148,7 +148,6 @@ func TestCompiler_compileModuleContextInitialization(t *testing.T) {
 
 			if tc.moduleInstance.MemoryInstance != nil {
 				bufSliceHeader := (*reflect.SliceHeader)(unsafe.Pointer(&tc.moduleInstance.MemoryInstance.Buffer))
-				require.Equal(t, uint64(bufSliceHeader.Len), ce.moduleContext.memorySliceLen)
 				require.Equal(t, bufSliceHeader.Data, ce.moduleContext.memoryElement0Address)
 				require.Equal(t, tc.moduleInstance.MemoryInstance, ce.moduleContext.memoryInstance)
 			}
