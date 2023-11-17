@@ -5042,6 +5042,8 @@ func (c *amd64Compiler) compileAtomicMemoryNotify(o *wazeroir.UnionOperation) er
 		return err
 	}
 	c.compileMemoryAlignmentCheck(reg, 4)
+	c.assembler.CompileRegisterToRegister(amd64.ADDQ, amd64ReservedRegisterForMemory, reg)
+	c.assembler.CompileConstToRegister(amd64.ADDQ, -4, reg)
 
 	// Push address and count back to read in Go
 	c.pushRuntimeValueLocationOnRegister(reg, runtimeValueTypeI64)
