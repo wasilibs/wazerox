@@ -41,6 +41,6 @@ For further details on the runtime, read about [wazero][18].
 [15]: https://tetrate.io/blog/introducing-wazero-from-tetrate/
 [16]: https://wazero.io/community/users/
 [17]: https://github.com/wasilibs/wazerox/stargazers
-[18]: https://github.com/testratelabs/wazero
+[18]: https://github.com/tetratelabs/wazero
 [19]: https://github.com/WebAssembly/threads
 [20]: https://wasix.org/
