@@ -8,7 +8,7 @@ import (
 	"os"
 	"path"
 
-	"github.com/wasilibs/wazerox"
+	wazero "github.com/wasilibs/wazerox"
 	"github.com/wasilibs/wazerox/internal/engine/wazevo"
 )
 

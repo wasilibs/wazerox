@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"unsafe"
 
-	"github.com/wasilibs/wazerox"
+	wazero "github.com/wasilibs/wazerox"
 )
 
 // validate accepts maybe-invalid Wasm module bytes and ensures that our validation phase works correctly

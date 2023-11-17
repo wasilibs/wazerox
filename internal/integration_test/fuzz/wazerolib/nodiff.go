@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/wasilibs/wazerox"
+	wazero "github.com/wasilibs/wazerox"
 	"github.com/wasilibs/wazerox/api"
 	"github.com/wasilibs/wazerox/internal/testing/binaryencoding"
 	"github.com/wasilibs/wazerox/internal/wasm"
