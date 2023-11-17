@@ -4,7 +4,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func TestArchContextOffsetInArm64Engine(t *testing.T) {

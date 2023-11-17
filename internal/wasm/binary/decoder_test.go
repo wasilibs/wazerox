@@ -3,11 +3,11 @@ package binary
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/testing/dwarftestdata"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/internal/testing/binaryencoding"
+	"github.com/wasilibs/wazerox/internal/testing/dwarftestdata"
+	"github.com/wasilibs/wazerox/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/wasm"
 )
 
 // TestDecodeModule relies on unit tests for Module.Encode, specifically that the encoding is both known and correct.

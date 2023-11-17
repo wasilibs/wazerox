@@ -5,7 +5,7 @@ package sysfs
 import (
 	"os"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
+	"github.com/wasilibs/wazerox/experimental/sys"
 )
 
 const (

@@ -10,17 +10,17 @@ import (
 	"net"
 	"time"
 
-	"github.com/tetratelabs/wazero/api"
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/engine/compiler"
-	"github.com/tetratelabs/wazero/internal/engine/interpreter"
-	"github.com/tetratelabs/wazero/internal/filecache"
-	"github.com/tetratelabs/wazero/internal/internalapi"
-	"github.com/tetratelabs/wazero/internal/platform"
-	internalsock "github.com/tetratelabs/wazero/internal/sock"
-	internalsys "github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/sys"
+	"github.com/wasilibs/wazerox/api"
+	experimentalsys "github.com/wasilibs/wazerox/experimental/sys"
+	"github.com/wasilibs/wazerox/internal/engine/compiler"
+	"github.com/wasilibs/wazerox/internal/engine/interpreter"
+	"github.com/wasilibs/wazerox/internal/filecache"
+	"github.com/wasilibs/wazerox/internal/internalapi"
+	"github.com/wasilibs/wazerox/internal/platform"
+	internalsock "github.com/wasilibs/wazerox/internal/sock"
+	internalsys "github.com/wasilibs/wazerox/internal/sys"
+	"github.com/wasilibs/wazerox/internal/wasm"
+	"github.com/wasilibs/wazerox/sys"
 )
 
 // RuntimeConfig controls runtime behavior, with the default implementation as

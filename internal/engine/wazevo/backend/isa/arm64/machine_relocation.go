@@ -1,8 +1,8 @@
 package arm64
 
 import (
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/backend"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/ssa"
 )
 
 // ResolveRelocations implements backend.Machine ResolveRelocations.

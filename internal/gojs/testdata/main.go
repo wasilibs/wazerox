@@ -4,17 +4,17 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/argsenv"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/crypto"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/fs"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/gc"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/goroutine"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/mem"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/process"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/stdio"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/testfs"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/time"
-	"github.com/tetratelabs/wazero/internal/gojs/testdata/writefs"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/argsenv"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/crypto"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/fs"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/gc"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/goroutine"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/mem"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/process"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/stdio"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/testfs"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/time"
+	"github.com/wasilibs/wazerox/internal/gojs/testdata/writefs"
 )
 
 // main includes a registry of all tests to reduce compilation time.

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"text/tabwriter"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 // testCtx is an arbitrary, non-default context. Non-nil also prevents linter errors.

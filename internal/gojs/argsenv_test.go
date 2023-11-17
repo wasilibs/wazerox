@@ -3,9 +3,9 @@ package gojs_test
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/internal/gojs/config"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	wazero "github.com/wasilibs/wazerox"
+	"github.com/wasilibs/wazerox/internal/gojs/config"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func Test_argsAndEnv(t *testing.T) {

@@ -3,7 +3,7 @@ package sysfs
 import (
 	"syscall"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
+	"github.com/wasilibs/wazerox/experimental/sys"
 )
 
 func unlink(name string) sys.Errno {

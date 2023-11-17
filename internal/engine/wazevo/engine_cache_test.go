@@ -6,10 +6,10 @@ import (
 	"io"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/u32"
-	"github.com/tetratelabs/wazero/internal/u64"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/wasilibs/wazerox/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/u32"
+	"github.com/wasilibs/wazerox/internal/u64"
+	"github.com/wasilibs/wazerox/internal/wasm"
 )
 
 var testVersion = "0.0.1"

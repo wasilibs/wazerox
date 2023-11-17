@@ -3,7 +3,7 @@ package experimental
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero/internal/close"
+	"github.com/wasilibs/wazerox/internal/close"
 )
 
 // CloseNotifier is a notification hook, invoked when a module is closed.

@@ -4,11 +4,11 @@ import (
 	_ "embed"
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	"github.com/tetratelabs/wazero/internal/testing/hammer"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	wazero "github.com/wasilibs/wazerox"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/experimental"
+	"github.com/wasilibs/wazerox/internal/testing/hammer"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 // We do not currently have hammer tests for bitwise and/or operations. The tests are designed to have

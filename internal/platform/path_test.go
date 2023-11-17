@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func TestToPosixPath(t *testing.T) {

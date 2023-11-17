@@ -3,8 +3,8 @@ package arm64
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/backend/regalloc"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func Test_regs(t *testing.T) {

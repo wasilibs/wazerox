@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/tetratelabs/wazero/internal/asm"
-	"github.com/tetratelabs/wazero/internal/asm/amd64"
-	"github.com/tetratelabs/wazero/internal/platform"
-	"github.com/tetratelabs/wazero/internal/u32"
-	"github.com/tetratelabs/wazero/internal/u64"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/internal/wazeroir"
+	"github.com/wasilibs/wazerox/internal/asm"
+	"github.com/wasilibs/wazerox/internal/asm/amd64"
+	"github.com/wasilibs/wazerox/internal/platform"
+	"github.com/wasilibs/wazerox/internal/u32"
+	"github.com/wasilibs/wazerox/internal/u64"
+	"github.com/wasilibs/wazerox/internal/wasm"
+	"github.com/wasilibs/wazerox/internal/wazeroir"
 )
 
 var (
@@ -5042,6 +5042,8 @@ func (c *amd64Compiler) compileAtomicMemoryNotify(o *wazeroir.UnionOperation) er
 		return err
 	}
 	c.compileMemoryAlignmentCheck(reg, 4)
+	c.assembler.CompileRegisterToRegister(amd64.ADDQ, amd64ReservedRegisterForMemory, reg)
+	c.assembler.CompileConstToRegister(amd64.ADDQ, -4, reg)
 
 	// Push address and count back to read in Go
 	c.pushRuntimeValueLocationOnRegister(reg, runtimeValueTypeI64)

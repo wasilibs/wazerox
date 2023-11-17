@@ -5,8 +5,8 @@ import (
 	_ "embed"
 	"log"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
+	wazero "github.com/wasilibs/wazerox"
+	"github.com/wasilibs/wazerox/api"
 )
 
 // This is a basic example of retrieving custom sections using RuntimeConfig.WithCustomSections.

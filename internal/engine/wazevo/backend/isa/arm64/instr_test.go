@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/backend/regalloc"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func TestInstruction_String(t *testing.T) {

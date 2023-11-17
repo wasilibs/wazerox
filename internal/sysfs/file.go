@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/fsapi"
-	"github.com/tetratelabs/wazero/sys"
+	experimentalsys "github.com/wasilibs/wazerox/experimental/sys"
+	"github.com/wasilibs/wazerox/internal/fsapi"
+	"github.com/wasilibs/wazerox/sys"
 )
 
 func NewStdioFile(stdin bool, f fs.File) (fsapi.File, error) {

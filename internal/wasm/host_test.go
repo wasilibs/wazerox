@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	. "github.com/tetratelabs/wazero/internal/wasip1"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/internal/testing/require"
+	. "github.com/wasilibs/wazerox/internal/wasip1"
 )
 
 func argsSizesGet(ctx context.Context, mod api.Module, resultArgc, resultArgvBufSize uint32) uint32 {

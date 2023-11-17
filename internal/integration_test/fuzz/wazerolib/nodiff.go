@@ -10,10 +10,10 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	wazero "github.com/wasilibs/wazerox"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/internal/testing/binaryencoding"
+	"github.com/wasilibs/wazerox/internal/wasm"
 )
 
 // require_no_diff ensures that the behavior is the same between the compiler and the interpreter for any given binary.

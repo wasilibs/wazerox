@@ -4,10 +4,10 @@ import (
 	"context"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/filecache"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	wazero "github.com/wasilibs/wazerox"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/internal/filecache"
+	"github.com/wasilibs/wazerox/internal/wasm"
 )
 
 // ConfigureWazevo modifies wazero.RuntimeConfig and sets the wazevo implementation.

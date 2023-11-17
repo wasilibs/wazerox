@@ -1,9 +1,9 @@
 package wasm
 
 import (
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/internalapi"
-	"github.com/tetratelabs/wazero/internal/wasmdebug"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/internal/internalapi"
+	"github.com/wasilibs/wazerox/internal/wasmdebug"
 )
 
 // ImportedFunctions returns the definitions of each imported function.

@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func Test_ToJsMode(t *testing.T) {

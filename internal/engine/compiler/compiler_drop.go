@@ -1,8 +1,8 @@
 package compiler
 
 import (
-	"github.com/tetratelabs/wazero/internal/asm"
-	"github.com/tetratelabs/wazero/internal/wazeroir"
+	"github.com/wasilibs/wazerox/internal/asm"
+	"github.com/wasilibs/wazerox/internal/wazeroir"
 )
 
 // compileDropRange adds instruction to drop the values on the target range

@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/tetratelabs/wazero"
+	wazero "github.com/wasilibs/wazerox"
 )
 
 // infiniteLoopWasm exports a function named "infinite_loop" that never exits.

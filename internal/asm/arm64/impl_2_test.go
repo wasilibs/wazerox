@@ -4,8 +4,8 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/asm"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/asm"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func TestAssemblerImpl_EncodeConstToRegister(t *testing.T) {

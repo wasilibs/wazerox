@@ -3,9 +3,9 @@ package bench
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/wasm"
-	"github.com/tetratelabs/wazero/internal/wasm/binary"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/internal/wasm"
+	"github.com/wasilibs/wazerox/internal/wasm/binary"
 )
 
 func BenchmarkCodec(b *testing.B) {

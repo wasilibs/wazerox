@@ -3,8 +3,8 @@ package amd64
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/asm"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/asm"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 // TestInstructionName ensures that all the instruction's name is defined.

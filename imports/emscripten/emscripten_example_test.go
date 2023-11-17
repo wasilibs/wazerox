@@ -4,9 +4,9 @@ import (
 	"context"
 	_ "embed"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/imports/emscripten"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	wazero "github.com/wasilibs/wazerox"
+	"github.com/wasilibs/wazerox/imports/emscripten"
+	"github.com/wasilibs/wazerox/imports/wasi_snapshot_preview1"
 )
 
 //go:embed testdata/invoke.wasm

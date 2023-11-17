@@ -3,7 +3,7 @@ package ssa
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func TestInstruction_InvertConditionalBrx(t *testing.T) {

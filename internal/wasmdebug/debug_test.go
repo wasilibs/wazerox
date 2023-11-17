@@ -5,9 +5,9 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasmruntime"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/wasmruntime"
 )
 
 func TestFuncName(t *testing.T) {
@@ -144,7 +144,7 @@ wasm stack trace:
 	x.y()`)
 	require.Contains(t, errStr, "Go runtime stack trace:")
 	require.Contains(t, errStr, "goroutine ")
-	require.Contains(t, errStr, "wazero/internal/wasmdebug/debug_test.go")
+	require.Contains(t, errStr, "wazerox/internal/wasmdebug/debug_test.go")
 }
 
 // compile-time check to ensure testRuntimeErr implements runtime.Error.

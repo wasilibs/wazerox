@@ -3,9 +3,9 @@ package wazero
 import (
 	"io/fs"
 
-	experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
-	"github.com/tetratelabs/wazero/internal/sys"
-	"github.com/tetratelabs/wazero/internal/sysfs"
+	experimentalsys "github.com/wasilibs/wazerox/experimental/sys"
+	"github.com/wasilibs/wazerox/internal/sys"
+	"github.com/wasilibs/wazerox/internal/sysfs"
 )
 
 // FSConfig configures filesystem paths the embedding host allows the wasm
