@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/wasilibs/wazerox/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/wasm"
 )
 
 // TestReRunFailedRequireNoDiffCase re-runs the failed case specified by WASM_BINARY_NAME in testdata directory.
