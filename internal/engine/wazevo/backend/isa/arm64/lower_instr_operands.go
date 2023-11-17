@@ -74,12 +74,15 @@ func (o operand) nr() regalloc.VReg {
 
 // operandER encodes the given VReg as an operand of operandKindER.
 func operandER(r regalloc.VReg, eop extendOp, to byte) operand {
+	if to < 32 {
+		panic("TODO?BUG?: when we need to extend to less than 32 bits?")
+	}
 	return operand{kind: operandKindER, data: uint64(r), data2: uint64(eop)<<32 | uint64(to)}
 }
 
 // er decodes the underlying VReg, extend operation, and the target size assuming the operand is of operandKindER.
 func (o operand) er() (r regalloc.VReg, eop extendOp, to byte) {
-	return regalloc.VReg(o.data), extendOp(o.data2>>32) & 0xff, byte(o.data) & 0xff
+	return regalloc.VReg(o.data), extendOp(o.data2>>32) & 0xff, byte(o.data2 & 0xff)
 }
 
 // operandSR encodes the given VReg as an operand of operandKindSR.
@@ -167,7 +170,7 @@ func (m *machine) getOperand_Imm12_ER_SR_NR(def *backend.SSAValueDefinition, mod
 	instr := def.Instr
 	if instr.Opcode() == ssa.OpcodeIconst {
 		if imm12Op, ok := asImm12Operand(instr.ConstantVal()); ok {
-			m.compiler.MarkLowered(instr)
+			instr.MarkLowered()
 			return imm12Op
 		}
 	}
@@ -185,7 +188,7 @@ func (m *machine) getOperand_MaybeNegatedImm12_ER_SR_NR(def *backend.SSAValueDef
 	if instr.Opcode() == ssa.OpcodeIconst {
 		c := instr.ConstantVal()
 		if imm12Op, ok := asImm12Operand(c); ok {
-			m.compiler.MarkLowered(instr)
+			instr.MarkLowered()
 			return imm12Op, false
 		}
 
@@ -195,7 +198,7 @@ func (m *machine) getOperand_MaybeNegatedImm12_ER_SR_NR(def *backend.SSAValueDef
 		}
 		negatedWithoutSign := -signExtended
 		if imm12Op, ok := asImm12Operand(uint64(negatedWithoutSign)); ok {
-			m.compiler.MarkLowered(instr)
+			instr.MarkLowered()
 			return imm12Op, true
 		}
 	}
@@ -215,15 +218,16 @@ func (m *machine) getOperand_ER_SR_NR(def *backend.SSAValueDefinition, mode extM
 
 		signed := extInstr.Opcode() == ssa.OpcodeSExtend
 		innerExtFromBits, innerExtToBits := extInstr.ExtendFromToBits()
-		if mode == extModeNone {
+		modeBits, modeSigned := mode.bits(), mode.signed()
+		if mode == extModeNone || innerExtToBits == modeBits {
 			eop := extendOpFrom(signed, innerExtFromBits)
-			op = operandER(m.compiler.VRegOf(extInstr.Arg()), eop, innerExtToBits)
-			m.compiler.MarkLowered(extInstr) // We merged the instruction in the operand.
+			extArg := m.getOperand_NR(m.compiler.ValueDefinition(extInstr.Arg()), extModeNone)
+			op = operandER(extArg.nr(), eop, innerExtToBits)
+			extInstr.MarkLowered()
 			return
 		}
 
-		modeBits, modeSigned := mode.bits(), mode.signed()
-		if innerExtToBits >= modeBits {
+		if innerExtToBits > modeBits {
 			panic("BUG?TODO?: need the results of inner extension to be larger than the mode")
 		}
 
@@ -232,7 +236,7 @@ func (m *machine) getOperand_ER_SR_NR(def *backend.SSAValueDefinition, mode extM
 			// Two sign/zero extensions are equivalent to one sign/zero extension for the larger size.
 			eop := extendOpFrom(modeSigned, innerExtFromBits)
 			op = operandER(m.compiler.VRegOf(extInstr.Arg()), eop, modeBits)
-			m.compiler.MarkLowered(extInstr) // We merged the instruction in the operand.
+			extInstr.MarkLowered()
 		case (signed && !modeSigned) || (!signed && modeSigned):
 			// We need to {sign, zero}-extend the result of the {zero,sign} extension.
 			eop := extendOpFrom(modeSigned, innerExtToBits)
@@ -255,14 +259,14 @@ func (m *machine) getOperand_SR_NR(def *backend.SSAValueDefinition, mode extMode
 	if m.compiler.MatchInstr(def, ssa.OpcodeIshl) {
 		// Check if the shift amount is constant instruction.
 		targetVal, amountVal := def.Instr.Arg2()
+		targetVReg := m.getOperand_NR(m.compiler.ValueDefinition(targetVal), extModeNone).nr()
 		amountDef := m.compiler.ValueDefinition(amountVal)
 		if amountDef.IsFromInstr() && amountDef.Instr.Constant() {
 			// If that is the case, we can use the shifted register operand (SR).
-			c := amountDef.Instr.ConstantVal() & 63 // Clears the unnecessary bits.
-			vreg := m.compiler.VRegOf(targetVal)
-			m.compiler.MarkLowered(def.Instr)
-			m.compiler.MarkLowered(amountDef.Instr)
-			return operandSR(vreg, byte(c), shiftOpLSL)
+			c := byte(amountDef.Instr.ConstantVal()) & (targetVal.Type().Bits() - 1) // Clears the unnecessary bits.
+			def.Instr.MarkLowered()
+			amountDef.Instr.MarkLowered()
+			return operandSR(targetVReg, c, shiftOpLSL)
 		}
 	}
 	return m.getOperand_NR(def, mode)
@@ -294,7 +298,7 @@ func (m *machine) getOperand_NR(def *backend.SSAValueDefinition, mode extMode) (
 		if instr.Constant() {
 			// We inline all the constant instructions so that we could reduce the register usage.
 			v = m.lowerConstant(instr)
-			m.compiler.MarkLowered(instr)
+			instr.MarkLowered()
 		} else {
 			if n := def.N; n == 0 {
 				v = m.compiler.VRegOf(instr.Return())
@@ -310,13 +314,13 @@ func (m *machine) getOperand_NR(def *backend.SSAValueDefinition, mode extMode) (
 	case mode == extModeNone:
 	case inBits == 32 && (mode == extModeZeroExtend32 || mode == extModeSignExtend32):
 	case inBits == 32 && mode == extModeZeroExtend64:
-		extended := m.compiler.AllocateVReg(regalloc.RegTypeInt)
+		extended := m.compiler.AllocateVReg(ssa.TypeI64)
 		ext := m.allocateInstr()
 		ext.asExtend(extended, v, 32, 64, false)
 		m.insert(ext)
 		r = extended
 	case inBits == 32 && mode == extModeSignExtend64:
-		extended := m.compiler.AllocateVReg(regalloc.RegTypeInt)
+		extended := m.compiler.AllocateVReg(ssa.TypeI64)
 		ext := m.allocateInstr()
 		ext.asExtend(extended, v, 32, 64, true)
 		m.insert(ext)

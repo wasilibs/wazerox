@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"testing"
 
 	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
@@ -51,7 +52,7 @@ func TestCompiler_lowerBlockArguments(t *testing.T) {
 					},
 				}
 
-				c := newCompiler(m, builder)
+				c := newCompiler(context.Background(), m, builder)
 				c.ssaValueDefinitions = []SSAValueDefinition{{Instr: i1}, {Instr: i2}, {Instr: f1}, {Instr: f2}}
 				c.ssaValueToVRegs = []regalloc.VReg{0, 1, 2, 3, 4, 5, 6, 7}
 				return c, []ssa.Value{i1.Return(), i2.Return(), f1.Return(), f2.Return()}, succ, func(t *testing.T) {
@@ -68,22 +69,6 @@ func TestCompiler_lowerBlockArguments(t *testing.T) {
 			},
 		},
 		{
-			name: "all src=dst",
-			setup: func(builder ssa.Builder) (*compiler, []ssa.Value, ssa.BasicBlock, func(t *testing.T)) {
-				blk := builder.AllocateBasicBlock()
-				i32 := blk.AddParam(builder, ssa.TypeI32)
-				i64 := blk.AddParam(builder, ssa.TypeI64)
-				f32 := blk.AddParam(builder, ssa.TypeF32)
-				f64 := blk.AddParam(builder, ssa.TypeF64)
-
-				m := &mockMachine{} // This ensures that InsertMove isn't called (otherwise, nil-panic happens).
-				c := newCompiler(m, builder)
-				c.ssaValueDefinitions = []SSAValueDefinition{{}, {}, {}, {}}
-				c.ssaValueToVRegs = []regalloc.VReg{0, 1, 2, 3}
-				return c, []ssa.Value{i32, i64, f32, f64}, blk, func(t *testing.T) {}
-			},
-		},
-		{
 			name: "overlap",
 			setup: func(builder ssa.Builder) (*compiler, []ssa.Value, ssa.BasicBlock, func(t *testing.T)) {
 				blk := builder.AllocateBasicBlock()
@@ -95,23 +80,27 @@ func TestCompiler_lowerBlockArguments(t *testing.T) {
 				m := &mockMachine{insertMove: func(dst, src regalloc.VReg) {
 					insertMoves = append(insertMoves, struct{ src, dst regalloc.VReg }{src: src, dst: dst})
 				}}
-				c := newCompiler(m, builder)
+				c := newCompiler(context.Background(), m, builder)
 				c.ssaValueDefinitions = []SSAValueDefinition{{}, {}, {}, {}}
 				c.ssaValueToVRegs = []regalloc.VReg{0, 1, 2, 3}
 				c.nextVRegID = 100 // Temporary reg should start with 100.
 				return c, []ssa.Value{v2, v1, v3 /* Swaps v1, v2 and pass v3 as-is. */}, blk, func(t *testing.T) {
-					require.Equal(t, 4, len(insertMoves))
-					mov1, mov2, mov3, mov4 := insertMoves[0], insertMoves[1], insertMoves[2], insertMoves[3]
+					require.Equal(t, 6, len(insertMoves)) // Three values are overlapped.
+					mov1, mov2, mov3, mov4, mov5, mov6 := insertMoves[0], insertMoves[1], insertMoves[2], insertMoves[3], insertMoves[4], insertMoves[5]
 					// Save the values to the temporary registers.
 					require.Equal(t, regalloc.VRegID(1), mov1.src.ID())
 					require.Equal(t, regalloc.VRegID(100), mov1.dst.ID())
 					require.Equal(t, regalloc.VRegID(0), mov2.src.ID())
 					require.Equal(t, regalloc.VRegID(101), mov2.dst.ID())
+					require.Equal(t, regalloc.VRegID(2), mov3.src.ID())
+					require.Equal(t, regalloc.VRegID(102), mov3.dst.ID())
 					// Then move back to the original place.
-					require.Equal(t, regalloc.VRegID(100), mov3.src.ID())
-					require.Equal(t, regalloc.VRegID(0), mov3.dst.ID())
-					require.Equal(t, regalloc.VRegID(101), mov4.src.ID())
-					require.Equal(t, regalloc.VRegID(1), mov4.dst.ID())
+					require.Equal(t, regalloc.VRegID(100), mov4.src.ID())
+					require.Equal(t, regalloc.VRegID(0), mov4.dst.ID())
+					require.Equal(t, regalloc.VRegID(101), mov5.src.ID())
+					require.Equal(t, regalloc.VRegID(1), mov5.dst.ID())
+					require.Equal(t, regalloc.VRegID(102), mov6.src.ID())
+					require.Equal(t, regalloc.VRegID(2), mov6.dst.ID())
 				}
 			},
 		},
@@ -129,7 +118,7 @@ func TestCompiler_lowerBlockArguments(t *testing.T) {
 				m := &mockMachine{insertMove: func(dst, src regalloc.VReg) {
 					insertMoves = append(insertMoves, struct{ src, dst regalloc.VReg }{src: src, dst: dst})
 				}}
-				c := newCompiler(m, builder)
+				c := newCompiler(context.Background(), m, builder)
 				c.ssaValueDefinitions = []SSAValueDefinition{{}, {}}
 				c.ssaValueToVRegs = []regalloc.VReg{0, 1}
 				return c, []ssa.Value{add.Return()}, blk, func(t *testing.T) {

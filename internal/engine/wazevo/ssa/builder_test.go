@@ -1,7 +1,6 @@
 package ssa
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/tetratelabs/wazero/internal/testing/require"
@@ -342,7 +341,7 @@ func TestBuilder_LayoutBlocks(t *testing.T) {
 				b.Seal(b2)
 				b.Seal(b3)
 			},
-			exp: []BasicBlockID{0, 2, 1, 3},
+			exp: []BasicBlockID{0, 1, 2, 3},
 		},
 		{
 			name: "loop towards loop header in fallthrough",
@@ -463,7 +462,7 @@ func TestBuilder_LayoutBlocks(t *testing.T) {
 				b.Seal(b5)
 			},
 			// The trampoline 6 is placed right after 4, which is the hot path of the loop.
-			exp: []BasicBlockID{0, 1, 2, 3, 4, 6, 5},
+			exp: []BasicBlockID{0, 1, 3, 2, 4, 6, 5},
 		},
 		{
 			name: "multiple critical edges",
@@ -604,11 +603,7 @@ func TestBuilder_LayoutBlocks(t *testing.T) {
 			tc.setup(b)
 
 			b.RunPasses() // LayoutBlocks() must be called after RunPasses().
-			fmt.Println("============ SSA before block layout ============")
-			fmt.Println(b.Format())
 			b.LayoutBlocks()
-			fmt.Println("============ SSA after block layout ============")
-			fmt.Println(b.Format())
 
 			var actual []BasicBlockID
 			for blk := b.BlockIteratorReversePostOrderBegin(); blk != nil; blk = b.BlockIteratorReversePostOrderNext() {

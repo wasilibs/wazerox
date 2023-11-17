@@ -1,120 +1,36 @@
 package wazevo_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"testing"
-	"unsafe"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/experimental"
+	"github.com/tetratelabs/wazero/experimental/logging"
 	"github.com/tetratelabs/wazero/internal/engine/wazevo"
 	"github.com/tetratelabs/wazero/internal/engine/wazevo/testcases"
-	"github.com/tetratelabs/wazero/internal/filecache"
-	"github.com/tetratelabs/wazero/internal/integration_test/spectest"
-	v1 "github.com/tetratelabs/wazero/internal/integration_test/spectest/v1"
+	"github.com/tetratelabs/wazero/internal/leb128"
 	"github.com/tetratelabs/wazero/internal/testing/binaryencoding"
+	"github.com/tetratelabs/wazero/internal/testing/dwarftestdata"
 	"github.com/tetratelabs/wazero/internal/testing/require"
 	"github.com/tetratelabs/wazero/internal/wasm"
 )
 
 const (
-	i32 = wasm.ValueTypeI32
-	i64 = wasm.ValueTypeI64
-	f32 = wasm.ValueTypeF32
-	f64 = wasm.ValueTypeF64
+	i32  = wasm.ValueTypeI32
+	i64  = wasm.ValueTypeI64
+	f32  = wasm.ValueTypeF32
+	f64  = wasm.ValueTypeF64
+	v128 = wasm.ValueTypeV128
 )
 
-func TestSpectestV1(t *testing.T) {
-	config := wazero.NewRuntimeConfigCompiler().WithCoreFeatures(api.CoreFeaturesV1)
-	// Configure the new optimizing backend!
-	configureWazevo(config)
-
-	// TODO: adds incrementally one by one as we support more test cases. And eventually remove this
-	// and migrate to integration_test/spectest/v1/spec_test.go by the time when closing https://github.com/tetratelabs/wazero/issues/1496
-	for _, tc := range []struct {
-		name string
-	}{
-		{name: "address"},
-		{name: "align"},
-		{name: "br"},
-		{name: "br_if"},
-		{name: "br_table"},
-		{name: "break-drop"},
-		{name: "block"},
-		{name: "binary"},
-		{name: "binary-leb128"},
-		{name: "call"},
-		{name: "call_indirect"},
-		{name: "comments"},
-		{name: "custom"},
-		{name: "conversions"},
-		{name: "const"},
-		{name: "data"},
-		{name: "elem"},
-		{name: "endianness"},
-		{name: "exports"},
-		{name: "f32"},
-		{name: "f32_bitwise"},
-		{name: "f32_cmp"},
-		{name: "f64"},
-		{name: "f64_bitwise"},
-		{name: "f64_cmp"},
-		{name: "fac"},
-		{name: "float_exprs"},
-		{name: "float_literals"},
-		{name: "float_memory"},
-		{name: "float_misc"},
-		{name: "func"},
-		{name: "func_ptrs"},
-		{name: "forward"},
-		{name: "globals"},
-		{name: "if"},
-		{name: "imports"},
-		{name: "inline-module"},
-		{name: "i32"},
-		{name: "i64"},
-		{name: "int_exprs"},
-		{name: "int_literals"},
-		{name: "labels"},
-		{name: "left-to-right"},
-		{name: "linking"},
-		{name: "load"},
-		//{name: "loop"},
-		{name: "local_get"},
-		{name: "local_set"},
-		{name: "local_tee"},
-		{name: "memory"},
-		{name: "memory_size"},
-		{name: "memory_grow"},
-		{name: "memory_redundancy"},
-		{name: "memory_trap"},
-		{name: "names"},
-		{name: "nop"},
-		{name: "return"},
-		{name: "select"},
-		{name: "start"},
-		{name: "stack"},
-		{name: "store"},
-		{name: "switch"},
-		{name: "skip-stack-guard-page"},
-		{name: "token"},
-		{name: "type"},
-		{name: "traps"},
-		{name: "unreachable"},
-		{name: "unreached-invalid"},
-		{name: "unwind"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			spectest.RunCase(t, v1.Testcases, tc.name, context.Background(), config,
-				-1, 0, math.MaxInt)
-		})
-	}
-}
-
 func TestE2E(t *testing.T) {
+	tmp := t.TempDir()
 	type callCase struct {
 		funcName           string // defaults to testcases.ExportedFunctionName
 		params, expResults []uint64
@@ -205,10 +121,9 @@ func TestE2E(t *testing.T) {
 				{params: []uint64{256, 0xff}, expResults: []uint64{0xff}},
 				{params: []uint64{100, 0xffffffff}, expResults: []uint64{0xffffffff}},
 				// We load I32, so we can't load from the last 3 bytes.
-				{params: []uint64{uint64(wasm.MemoryPageSize) - 3}, expErr: "out of bounds memory access"},
+				{params: []uint64{uint64(wasm.MemoryPageSize) - 3, 0}, expErr: "out of bounds memory access"},
 			},
 		},
-
 		{
 			name: "memory_load_basic",
 			m:    testcases.MemoryLoadBasic.Module,
@@ -317,54 +232,129 @@ func TestE2E(t *testing.T) {
 				{params: []uint64{1000, 300}, expResults: []uint64{11 + 300}},
 			},
 		},
+		{
+			name: "multi_predecessor_local_ref",
+			m:    testcases.MultiPredecessorLocalRef.Module,
+			calls: []callCase{
+				{params: []uint64{0, 100}, expResults: []uint64{100}},
+				{params: []uint64{1, 100}, expResults: []uint64{1}},
+				{params: []uint64{1, 200}, expResults: []uint64{1}},
+			},
+		},
+		{
+			name: "vector_bit_select",
+			m:    testcases.VecBitSelect.Module,
+			calls: []callCase{
+				{params: []uint64{1, 2, 3, 4, 5, 6}, expResults: []uint64{0x3, 0x2, 0x5, 0x6}},
+			},
+		},
+		{
+			name: "vector_shuffle",
+			m:    testcases.VecShuffle.Module,
+			calls: []callCase{
+				{params: []uint64{0x01010101, 0x02020202, 0x03030303, 0x04040404}, expResults: []uint64{0x01010101, 0x04040404}},
+				{params: []uint64{0x03030303, 0x04040404, 0x01010101, 0x02020202}, expResults: []uint64{0x03030303, 0x02020202}},
+				{params: []uint64{0x00000000, 0xffffffff, 0xffffffff, 0x00000000}, expResults: []uint64{0x00000000, 0x00000000}},
+				{params: []uint64{0xffffffff, 0x00000000, 0x00000000, 0xffffffff}, expResults: []uint64{0xffffffff, 0xffffffff}},
+				{params: []uint64{0x00000000, 0x11111111, 0x11111111, 0xffffffff}, expResults: []uint64{0x00000000, 0xffffffff}},
+			},
+		},
+		{
+			name: "vector_shuffle (1st only)",
+			m:    testcases.VecShuffleWithLane(1, 1, 1, 1, 0, 0, 0, 0, 10, 10, 10, 10, 0, 0, 0, 0),
+			calls: []callCase{
+				{params: []uint64{0x0000000000000b0a, 0x0c0000, 0xffffffffffffffff, 0xffffffffffffffff}, expResults: []uint64{0x0a0a0a0a0b0b0b0b, 0x0a0a0a0a0c0c0c0c}},
+				{params: []uint64{0x01010101, 0x02020202, 0x03030303, 0x04040404}, expResults: []uint64{0x0101010101010101, 0x101010102020202}},
+				{params: []uint64{0x03030303, 0x04040404, 0x01010101, 0x02020202}, expResults: []uint64{0x0303030303030303, 0x303030304040404}},
+				{params: []uint64{0x00000000, 0xffffffff, 0xffffffff, 0x00000000}, expResults: []uint64{0x0000000000000000, 0x0000000ffffffff}},
+				{params: []uint64{0xffffffff, 0x00000000, 0x00000000, 0xffffffff}, expResults: []uint64{0xffffffffffffffff, 0xffffffff00000000}},
+				{params: []uint64{0x00000000, 0x11111111, 0x11111111, 0xffffffff}, expResults: []uint64{0x0000000000000000, 0x0000000011111111}},
+			},
+		},
+		{
+			name: "vector_shuffle (2nd only)",
+			m:    testcases.VecShuffleWithLane(17, 17, 17, 17, 16, 16, 16, 16, 26, 26, 26, 26, 16, 16, 16, 16),
+			calls: []callCase{
+				{params: []uint64{0xffffffffffffffff, 0xffffffffffffffff, 0x0000000000000b0a, 0x0c0000}, expResults: []uint64{0x0a0a0a0a0b0b0b0b, 0x0a0a0a0a0c0c0c0c}},
+				{params: []uint64{0x01010101, 0x02020202, 0x03030303, 0x04040404}, expResults: []uint64{0x303030303030303, 0x303030304040404}},
+				{params: []uint64{0x03030303, 0x04040404, 0x01010101, 0x02020202}, expResults: []uint64{0x101010101010101, 0x101010102020202}},
+				{params: []uint64{0x00000000, 0xffffffff, 0xffffffff, 0x00000000}, expResults: []uint64{0xffffffffffffffff, 0xffffffff00000000}},
+				{params: []uint64{0xffffffff, 0x00000000, 0x00000000, 0xffffffff}, expResults: []uint64{0x0000000000000000, 0xffffffff}},
+				{params: []uint64{0x00000000, 0x11111111, 0x11111111, 0xffffffff}, expResults: []uint64{0x1111111111111111, 0x11111111ffffffff}},
+			},
+		},
+		{
+			name: "vector_shuffle (mixed)",
+			m:    testcases.VecShuffleWithLane(0, 17, 2, 19, 4, 21, 6, 23, 8, 25, 10, 27, 12, 29, 14, 31),
+			calls: []callCase{
+				{params: []uint64{0xff08ff07ff06ff05, 0xff04ff03ff02ff01, 0x18ff17ff16ff15ff, 0x14ff13ff12ff11ff}, expResults: []uint64{0x1808170716061505, 0x1404130312021101}},
+				{params: []uint64{0x01010101, 0x02020202, 0x03030303, 0x04040404}, expResults: []uint64{0x3010301, 0x4020402}},
+				{params: []uint64{0x03030303, 0x04040404, 0x01010101, 0x02020202}, expResults: []uint64{0x1030103, 0x2040204}},
+				{params: []uint64{0x00000000, 0xffffffff, 0xffffffff, 0x00000000}, expResults: []uint64{0xff00ff00, 0xff00ff}},
+				{params: []uint64{0xffffffff, 0x00000000, 0x00000000, 0xffffffff}, expResults: []uint64{0xff00ff, 0xff00ff00}},
+				{params: []uint64{0x00000000, 0x11111111, 0x11111111, 0xffffffff}, expResults: []uint64{0x11001100, 0xff11ff11}},
+			},
+		},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			config := wazero.NewRuntimeConfigCompiler()
-
-			// Configure the new optimizing backend!
-			configureWazevo(config)
-
-			ctx := context.Background()
-			r := wazero.NewRuntimeWithConfig(ctx, config)
-			defer func() {
-				require.NoError(t, r.Close(ctx))
-			}()
-
-			if tc.imported != nil {
-				imported, err := r.CompileModule(ctx, binaryencoding.EncodeModule(tc.imported))
-				require.NoError(t, err)
-
-				_, err = r.InstantiateModule(ctx, imported, wazero.NewModuleConfig())
-				require.NoError(t, err)
-			}
-
-			compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(tc.m))
-			require.NoError(t, err)
-
-			inst, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
-			require.NoError(t, err)
-
-			for _, cc := range tc.calls {
-				name := cc.funcName
-				if name == "" {
-					name = testcases.ExportedFunctionName
+			for i := 0; i < 2; i++ {
+				var name string
+				if i == 0 {
+					name = "no cache"
+				} else {
+					name = "with cache"
 				}
-				t.Run(fmt.Sprintf("call_%s%v", name, cc.params), func(t *testing.T) {
-					f := inst.ExportedFunction(name)
-					require.NotNil(t, f)
-					result, err := f.Call(ctx, cc.params...)
-					if cc.expErr != "" {
-						require.EqualError(t, err, cc.expErr)
-					} else {
+				t.Run(name, func(t *testing.T) {
+					cache, err := wazero.NewCompilationCacheWithDir(tmp)
+					require.NoError(t, err)
+					config := wazero.NewRuntimeConfigCompiler().WithCompilationCache(cache)
+
+					// Configure the new optimizing backend!
+					wazevo.ConfigureWazevo(config)
+
+					ctx := context.Background()
+					r := wazero.NewRuntimeWithConfig(ctx, config)
+					defer func() {
+						require.NoError(t, r.Close(ctx))
+					}()
+
+					if tc.imported != nil {
+						imported, err := r.CompileModule(ctx, binaryencoding.EncodeModule(tc.imported))
 						require.NoError(t, err)
-						require.Equal(t, len(cc.expResults), len(result))
-						require.Equal(t, cc.expResults, result)
-						for i := range cc.expResults {
-							if cc.expResults[i] != result[i] {
-								t.Errorf("result[%d]: exp %d, got %d", i, cc.expResults[i], result[i])
-							}
+
+						_, err = r.InstantiateModule(ctx, imported, wazero.NewModuleConfig())
+						require.NoError(t, err)
+					}
+
+					compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(tc.m))
+					require.NoError(t, err)
+
+					inst, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
+					require.NoError(t, err)
+
+					for _, cc := range tc.calls {
+						name := cc.funcName
+						if name == "" {
+							name = testcases.ExportedFunctionName
 						}
+						t.Run(fmt.Sprintf("call_%s%v", name, cc.params), func(t *testing.T) {
+							f := inst.ExportedFunction(name)
+							require.NotNil(t, f)
+							result, err := f.Call(ctx, cc.params...)
+							if cc.expErr != "" {
+								require.Contains(t, err.Error(), cc.expErr)
+							} else {
+								require.NoError(t, err)
+								require.Equal(t, len(cc.expResults), len(result))
+								require.Equal(t, cc.expResults, result)
+								for i := range cc.expResults {
+									if cc.expResults[i] != result[i] {
+										t.Errorf("result[%d]: exp %d, got %d", i, cc.expResults[i], result[i])
+									}
+								}
+							}
+						})
 					}
 				})
 			}
@@ -372,115 +362,110 @@ func TestE2E(t *testing.T) {
 	}
 }
 
-// configureWazevo modifies wazero.RuntimeConfig and sets the wazevo implementation.
-// This is a hack to avoid modifying outside the wazevo package while testing it end-to-end.
-func configureWazevo(config wazero.RuntimeConfig) {
-	// This is the internal representation of interface in Go.
-	// https://research.swtch.com/interfaces
-	type iface struct {
-		_    *byte
-		data unsafe.Pointer
-	}
-
-	configInterface := (*iface)(unsafe.Pointer(&config))
-
-	// This corresponds to the unexported wazero.runtimeConfig, and the target field newEngine exists
-	// in the middle of the implementation.
-	type newEngine func(context.Context, api.CoreFeatures, filecache.Cache) wasm.Engine
-	type runtimeConfig struct {
-		enabledFeatures       api.CoreFeatures
-		memoryLimitPages      uint32
-		memoryCapacityFromMax bool
-		engineKind            int
-		dwarfDisabled         bool
-		newEngine
-		// Other fields follow, but we don't care.
-	}
-	cm := (*runtimeConfig)(configInterface.data)
-	// Insert the wazevo implementation.
-	cm.newEngine = wazevo.NewEngine
-}
-
 func TestE2E_host_functions(t *testing.T) {
-	config := wazero.NewRuntimeConfigCompiler()
+	var buf bytes.Buffer
+	ctx := context.WithValue(context.Background(), experimental.FunctionListenerFactoryKey{}, logging.NewLoggingListenerFactory(&buf))
 
-	// Configure the new optimizing backend!
-	configureWazevo(config)
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "listener", ctx: ctx},
+		{name: "no listener", ctx: context.Background()},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := tc.ctx
 
-	ctx := context.Background()
-	r := wazero.NewRuntimeWithConfig(ctx, config)
-	defer func() {
-		require.NoError(t, r.Close(ctx))
-	}()
+			config := wazero.NewRuntimeConfigCompiler()
 
-	var expectedMod api.Module
+			// Configure the new optimizing backend!
+			wazevo.ConfigureWazevo(config)
 
-	b := r.NewHostModuleBuilder("env")
-	b.NewFunctionBuilder().WithFunc(func(ctx2 context.Context, d float64) float64 {
-		require.Equal(t, ctx, ctx2)
-		require.Equal(t, 35.0, d)
-		return math.Sqrt(d)
-	}).Export("root")
-	b.NewFunctionBuilder().WithFunc(func(ctx2 context.Context, mod api.Module, a uint32, b uint64, c float32, d float64) (uint32, uint64, float32, float64) {
-		require.Equal(t, expectedMod, mod)
-		require.Equal(t, ctx, ctx2)
-		require.Equal(t, uint32(2), a)
-		require.Equal(t, uint64(100), b)
-		require.Equal(t, float32(15.0), c)
-		require.Equal(t, 35.0, d)
-		return a * a, b * b, c * c, d * d
-	}).Export("square")
+			r := wazero.NewRuntimeWithConfig(ctx, config)
+			defer func() {
+				require.NoError(t, r.Close(ctx))
+			}()
 
-	_, err := b.Instantiate(ctx)
-	require.NoError(t, err)
+			var expectedMod api.Module
 
-	m := &wasm.Module{
-		ImportFunctionCount: 2,
-		ImportSection: []wasm.Import{
-			{Module: "env", Name: "root", Type: wasm.ExternTypeFunc, DescFunc: 0},
-			{Module: "env", Name: "square", Type: wasm.ExternTypeFunc, DescFunc: 1},
-		},
-		TypeSection: []wasm.FunctionType{
-			{Results: []wasm.ValueType{f64}, Params: []wasm.ValueType{f64}},
-			{Results: []wasm.ValueType{i32, i64, f32, f64}, Params: []wasm.ValueType{i32, i64, f32, f64}},
-			{Results: []wasm.ValueType{i32, i64, f32, f64, f64}, Params: []wasm.ValueType{i32, i64, f32, f64}},
-		},
-		FunctionSection: []wasm.Index{2},
-		CodeSection: []wasm.Code{{
-			Body: []byte{
-				wasm.OpcodeLocalGet, 0, wasm.OpcodeLocalGet, 1, wasm.OpcodeLocalGet, 2, wasm.OpcodeLocalGet, 3,
-				wasm.OpcodeCall, 1,
-				wasm.OpcodeLocalGet, 3,
-				wasm.OpcodeCall, 0,
-				wasm.OpcodeEnd,
-			},
-		}},
-		ExportSection: []wasm.Export{{Name: testcases.ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 2}},
+			b := r.NewHostModuleBuilder("env")
+			b.NewFunctionBuilder().WithFunc(func(ctx2 context.Context, d float64) float64 {
+				require.Equal(t, ctx, ctx2)
+				require.Equal(t, 35.0, d)
+				return math.Sqrt(d)
+			}).Export("root")
+			b.NewFunctionBuilder().WithFunc(func(ctx2 context.Context, mod api.Module, a uint32, b uint64, c float32, d float64) (uint32, uint64, float32, float64) {
+				require.Equal(t, expectedMod, mod)
+				require.Equal(t, ctx, ctx2)
+				require.Equal(t, uint32(2), a)
+				require.Equal(t, uint64(100), b)
+				require.Equal(t, float32(15.0), c)
+				require.Equal(t, 35.0, d)
+				return a * a, b * b, c * c, d * d
+			}).Export("square")
+
+			_, err := b.Instantiate(ctx)
+			require.NoError(t, err)
+
+			m := &wasm.Module{
+				ImportFunctionCount: 2,
+				ImportSection: []wasm.Import{
+					{Module: "env", Name: "root", Type: wasm.ExternTypeFunc, DescFunc: 0},
+					{Module: "env", Name: "square", Type: wasm.ExternTypeFunc, DescFunc: 1},
+				},
+				TypeSection: []wasm.FunctionType{
+					{Results: []wasm.ValueType{f64}, Params: []wasm.ValueType{f64}},
+					{Results: []wasm.ValueType{i32, i64, f32, f64}, Params: []wasm.ValueType{i32, i64, f32, f64}},
+					{Results: []wasm.ValueType{i32, i64, f32, f64, f64}, Params: []wasm.ValueType{i32, i64, f32, f64}},
+				},
+				FunctionSection: []wasm.Index{2},
+				CodeSection: []wasm.Code{{
+					Body: []byte{
+						wasm.OpcodeLocalGet, 0, wasm.OpcodeLocalGet, 1, wasm.OpcodeLocalGet, 2, wasm.OpcodeLocalGet, 3,
+						wasm.OpcodeCall, 1,
+						wasm.OpcodeLocalGet, 3,
+						wasm.OpcodeCall, 0,
+						wasm.OpcodeEnd,
+					},
+				}},
+				ExportSection: []wasm.Export{{Name: testcases.ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 2}},
+			}
+
+			compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(m))
+			require.NoError(t, err)
+
+			inst, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
+			require.NoError(t, err)
+
+			expectedMod = inst
+
+			f := inst.ExportedFunction(testcases.ExportedFunctionName)
+
+			res, err := f.Call(ctx, []uint64{2, 100, uint64(math.Float32bits(15.0)), math.Float64bits(35.0)}...)
+			require.NoError(t, err)
+			require.Equal(t, []uint64{
+				2 * 2, 100 * 100, uint64(math.Float32bits(15.0 * 15.0)), math.Float64bits(35.0 * 35.0),
+				math.Float64bits(math.Sqrt(35.0)),
+			}, res)
+		})
 	}
 
-	compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(m))
-	require.NoError(t, err)
-
-	inst, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
-	require.NoError(t, err)
-
-	expectedMod = inst
-
-	f := inst.ExportedFunction(testcases.ExportedFunctionName)
-
-	res, err := f.Call(ctx, []uint64{2, 100, uint64(math.Float32bits(15.0)), math.Float64bits(35.0)}...)
-	require.NoError(t, err)
-	require.Equal(t, []uint64{
-		2 * 2, 100 * 100, uint64(math.Float32bits(15.0 * 15.0)), math.Float64bits(35.0 * 35.0),
-		math.Float64bits(math.Sqrt(35.0)),
-	}, res)
+	require.Equal(t, `
+--> .$2(2,100,15,35)
+	==> env.square(2,100,15,35)
+	<== (4,10000,225,1225)
+	==> env.root(35)
+	<== 5.916079783099616
+<-- (4,10000,225,1225,5.916079783099616)
+`, "\n"+buf.String())
 }
 
 func TestE2E_stores(t *testing.T) {
 	config := wazero.NewRuntimeConfigCompiler()
 
 	// Configure the new optimizing backend!
-	configureWazevo(config)
+	wazevo.ConfigureWazevo(config)
 
 	ctx := context.Background()
 	r := wazero.NewRuntimeWithConfig(ctx, config)
@@ -570,7 +555,7 @@ func TestE2E_reexported_memory(t *testing.T) {
 	config := wazero.NewRuntimeConfigCompiler()
 
 	// Configure the new optimizing backend!
-	configureWazevo(config)
+	wazevo.ConfigureWazevo(config)
 
 	ctx := context.Background()
 	r := wazero.NewRuntimeWithConfig(ctx, config)
@@ -595,4 +580,359 @@ func TestE2E_reexported_memory(t *testing.T) {
 	require.Equal(t, mem, m3Inst.Memory())
 	require.Equal(t, mem, m2Inst.Memory())
 	require.Equal(t, uint32(11), mem.Size()/65536)
+}
+
+func TestStackUnwind_panic_in_host(t *testing.T) {
+	unreachable := &wasm.Module{
+		ImportFunctionCount: 1,
+		ImportSection:       []wasm.Import{{Module: "host", Name: "cause_unreachable", Type: wasm.ExternTypeFunc, DescFunc: 0}},
+		TypeSection:         []wasm.FunctionType{{}},
+		ExportSection:       []wasm.Export{{Name: "main", Type: wasm.ExternTypeFunc, Index: 1}},
+		FunctionSection:     []wasm.Index{0, 0, 0},
+		CodeSection: []wasm.Code{
+			{Body: []byte{wasm.OpcodeCall, 2, wasm.OpcodeEnd}},
+			{Body: []byte{wasm.OpcodeCall, 3, wasm.OpcodeEnd}},
+			{Body: []byte{wasm.OpcodeCall, 0, wasm.OpcodeEnd}}, // call host.cause_unreachable.
+		},
+		NameSection: &wasm.NameSection{
+			FunctionNames: wasm.NameMap{
+				wasm.NameAssoc{Index: 0, Name: "host.unreachable"},
+				wasm.NameAssoc{Index: 1, Name: "main"},
+				wasm.NameAssoc{Index: 2, Name: "one"},
+				wasm.NameAssoc{Index: 3, Name: "two"},
+			},
+		},
+	}
+
+	config := wazero.NewRuntimeConfigCompiler()
+
+	// Configure the new optimizing backend!
+	wazevo.ConfigureWazevo(config)
+
+	ctx := context.Background()
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+
+	callUnreachable := func() {
+		panic("panic in host function")
+	}
+
+	_, err := r.NewHostModuleBuilder("host").
+		NewFunctionBuilder().WithFunc(callUnreachable).Export("cause_unreachable").
+		Instantiate(ctx)
+	require.NoError(t, err)
+
+	module, err := r.Instantiate(ctx, binaryencoding.EncodeModule(unreachable))
+	require.NoError(t, err)
+	defer module.Close(ctx)
+
+	_, err = module.ExportedFunction("main").Call(ctx)
+	exp := `panic in host function (recovered by wazero)
+wasm stack trace:
+	host.cause_unreachable()
+	.two()
+	.one()
+	.main()`
+	require.Equal(t, exp, err.Error())
+}
+
+func TestStackUnwind_unreachable(t *testing.T) {
+	unreachable := &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{}},
+		ExportSection:   []wasm.Export{{Name: "main", Type: wasm.ExternTypeFunc, Index: 0}},
+		FunctionSection: []wasm.Index{0, 0, 0},
+		CodeSection: []wasm.Code{
+			{Body: []byte{wasm.OpcodeCall, 1, wasm.OpcodeEnd}},
+			{Body: []byte{wasm.OpcodeCall, 2, wasm.OpcodeEnd}},
+			{Body: []byte{wasm.OpcodeUnreachable, wasm.OpcodeEnd}},
+		},
+		NameSection: &wasm.NameSection{
+			FunctionNames: wasm.NameMap{
+				wasm.NameAssoc{Index: 0, Name: "main"},
+				wasm.NameAssoc{Index: 1, Name: "one"},
+				wasm.NameAssoc{Index: 2, Name: "two"},
+			},
+		},
+	}
+
+	config := wazero.NewRuntimeConfigCompiler()
+
+	// Configure the new optimizing backend!
+	wazevo.ConfigureWazevo(config)
+
+	ctx := context.Background()
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+
+	module, err := r.Instantiate(ctx, binaryencoding.EncodeModule(unreachable))
+	require.NoError(t, err)
+	defer module.Close(ctx)
+
+	_, err = module.ExportedFunction("main").Call(ctx)
+	exp := `wasm error: unreachable
+wasm stack trace:
+	.two()
+	.one()
+	.main()`
+	require.Equal(t, exp, err.Error())
+}
+
+func TestListener_local(t *testing.T) {
+	var buf bytes.Buffer
+	config := wazero.NewRuntimeConfigCompiler()
+	ctx := context.WithValue(context.Background(), experimental.FunctionListenerFactoryKey{}, logging.NewLoggingListenerFactory(&buf))
+
+	// Configure the new optimizing backend!
+	wazevo.ConfigureWazevo(config)
+
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+
+	compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(testcases.CallIndirect.Module))
+	require.NoError(t, err)
+
+	inst, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
+	require.NoError(t, err)
+
+	res, err := inst.ExportedFunction(testcases.ExportedFunctionName).Call(ctx, 1)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{10}, res)
+
+	require.Equal(t, `
+--> .$0(1)
+	--> .$2()
+	<-- 10
+<-- 10
+`, "\n"+buf.String())
+}
+
+func TestListener_imported(t *testing.T) {
+	var buf bytes.Buffer
+	config := wazero.NewRuntimeConfigCompiler()
+	ctx := context.WithValue(context.Background(), experimental.FunctionListenerFactoryKey{}, logging.NewLoggingListenerFactory(&buf))
+
+	// Configure the new optimizing backend!
+	wazevo.ConfigureWazevo(config)
+
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+
+	_, err := r.Instantiate(ctx, binaryencoding.EncodeModule(testcases.ImportedFunctionCall.Imported))
+	require.NoError(t, err)
+
+	compiled, err := r.CompileModule(ctx, binaryencoding.EncodeModule(testcases.ImportedFunctionCall.Module))
+	require.NoError(t, err)
+
+	inst, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
+	require.NoError(t, err)
+
+	res, err := inst.ExportedFunction(testcases.ExportedFunctionName).Call(ctx, 100)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{10000}, res)
+
+	require.Equal(t, `
+--> .$1(100)
+	--> env.$0(100,100)
+	<-- 10000
+<-- 10000
+`, "\n"+buf.String())
+}
+
+func TestListener_long(t *testing.T) {
+	pickOneParam := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection: []wasm.FunctionType{{Results: []wasm.ValueType{i32}, Params: []wasm.ValueType{
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+			i32, i32, f32, f64, i64, i32, i32, v128, f32,
+		}}},
+		ExportSection:   []wasm.Export{{Name: "main", Type: wasm.ExternTypeFunc, Index: 0}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection: []wasm.Code{
+			{Body: []byte{wasm.OpcodeLocalGet, 10, wasm.OpcodeEnd}},
+		},
+	})
+
+	var buf bytes.Buffer
+	config := wazero.NewRuntimeConfigCompiler()
+	ctx := context.WithValue(context.Background(), experimental.FunctionListenerFactoryKey{}, logging.NewLoggingListenerFactory(&buf))
+
+	// Configure the new optimizing backend!
+	wazevo.ConfigureWazevo(config)
+
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+
+	inst, err := r.Instantiate(ctx, pickOneParam)
+	require.NoError(t, err)
+
+	f := inst.ExportedFunction("main")
+	require.NotNil(t, f)
+	param := make([]uint64, 100)
+	for i := range param {
+		param[i] = uint64(i)
+	}
+	res, err := f.Call(ctx, param...)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{0xb}, res)
+
+	require.Equal(t, `
+--> .$0(0,1,3e-45,1.5e-323,4,5,6,00000000000000070000000000000008,1.1e-44,9,10,1.5e-44,6e-323,13,14,15,00000000000000100000000000000011,2.4e-44,18,19,2.8e-44,1.04e-322,22,23,24,0000000000000019000000000000001a,3.6e-44,27,28,4e-44,1.5e-322,31,32,33,00000000000000220000000000000023,4.9e-44,36,37,5.3e-44,1.93e-322,40,41,42,000000000000002b000000000000002c,6.2e-44,45,46,6.6e-44,2.37e-322,49,50,51,00000000000000340000000000000035,7.4e-44,54,55,7.8e-44,2.8e-322,58,59,60,000000000000003d000000000000003e,8.7e-44,63,64,9.1e-44,3.26e-322,67,68,69,00000000000000460000000000000047,1e-43,72,73,1.04e-43,3.7e-322,76,77,78,000000000000004f0000000000000050,1.12e-43,81,82,1.16e-43,4.15e-322,85,86,87,00000000000000580000000000000059,1.25e-43)
+<-- 11
+`, "\n"+buf.String())
+}
+
+func TestListener_long_as_is(t *testing.T) {
+	params := []wasm.ValueType{
+		i32, i64, i32, i64, i32, i64, i32, i64, i32, i64,
+		i32, i64, i32, i64, i32, i64, i32, i64, i32, i64,
+	}
+
+	const paramNum = 20
+
+	var body []byte
+	for i := 0; i < paramNum; i++ {
+		body = append(body, wasm.OpcodeLocalGet)
+		body = append(body, leb128.EncodeUint32(uint32(i))...)
+	}
+	body = append(body, wasm.OpcodeEnd)
+
+	bin := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Results: params, Params: params}},
+		ExportSection:   []wasm.Export{{Name: "main", Type: wasm.ExternTypeFunc, Index: 0}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection:     []wasm.Code{{Body: body}},
+	})
+
+	var buf bytes.Buffer
+	config := wazero.NewRuntimeConfigCompiler()
+	ctx := context.WithValue(context.Background(), experimental.FunctionListenerFactoryKey{}, logging.NewLoggingListenerFactory(&buf))
+
+	// Configure the new optimizing backend!
+	wazevo.ConfigureWazevo(config)
+
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+
+	inst, err := r.Instantiate(ctx, bin)
+	require.NoError(t, err)
+
+	f := inst.ExportedFunction("main")
+	require.NotNil(t, f)
+	param := make([]uint64, paramNum)
+	for i := range param {
+		param[i] = uint64(i)
+	}
+	res, err := f.Call(ctx, param...)
+	require.NoError(t, err)
+	require.Equal(t, param, res)
+
+	require.Equal(t, `
+--> .$0(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19)
+<-- (0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19)
+`, "\n"+buf.String())
+}
+
+func TestListener_long_many_consts(t *testing.T) {
+	const paramNum = 61
+
+	var exp []uint64
+	var body []byte
+	var resultTypes []wasm.ValueType
+	for i := 0; i < paramNum; i++ {
+		exp = append(exp, uint64(i))
+		resultTypes = append(resultTypes, i32)
+		body = append(body, wasm.OpcodeI32Const)
+		body = append(body, leb128.EncodeInt32(int32(i))...)
+	}
+	body = append(body, wasm.OpcodeEnd)
+
+	bin := binaryencoding.EncodeModule(&wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Results: resultTypes}},
+		ExportSection:   []wasm.Export{{Name: "main", Type: wasm.ExternTypeFunc, Index: 0}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection:     []wasm.Code{{Body: body}},
+	})
+
+	var buf bytes.Buffer
+	config := wazero.NewRuntimeConfigCompiler()
+	ctx := context.WithValue(context.Background(), experimental.FunctionListenerFactoryKey{}, logging.NewLoggingListenerFactory(&buf))
+
+	// Configure the new optimizing backend!
+	wazevo.ConfigureWazevo(config)
+
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer func() {
+		require.NoError(t, r.Close(ctx))
+	}()
+
+	inst, err := r.Instantiate(ctx, bin)
+	require.NoError(t, err)
+
+	f := inst.ExportedFunction("main")
+	require.NotNil(t, f)
+	res, err := f.Call(ctx)
+	require.NoError(t, err)
+	require.Equal(t, exp, res)
+
+	require.Equal(t, `
+--> .$0()
+<-- (0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60)
+`, "\n"+buf.String())
+}
+
+// TestDWARF verifies that the DWARF based stack traces work as expected before/after compilation cache.
+func TestDWARF(t *testing.T) {
+	config := wazero.NewRuntimeConfigCompiler()
+	ctx := context.Background()
+
+	// Configure the new optimizing backend!
+	wazevo.ConfigureWazevo(config)
+
+	bin := dwarftestdata.ZigWasm
+
+	dir := t.TempDir()
+
+	var expErr error
+	{
+		cc, err := wazero.NewCompilationCacheWithDir(dir)
+		require.NoError(t, err)
+		rc := config.WithCompilationCache(cc)
+
+		r := wazero.NewRuntimeWithConfig(ctx, rc)
+		_, expErr = r.Instantiate(ctx, bin)
+		require.Error(t, expErr)
+
+		err = r.Close(ctx)
+		require.NoError(t, err)
+	}
+
+	cc, err := wazero.NewCompilationCacheWithDir(dir)
+	require.NoError(t, err)
+	rc := config.WithCompilationCache(cc)
+	r := wazero.NewRuntimeWithConfig(ctx, rc)
+	_, err = r.Instantiate(ctx, bin)
+	require.Error(t, err)
+	require.Equal(t, expErr.Error(), err.Error())
+
+	err = r.Close(ctx)
+	require.NoError(t, err)
 }

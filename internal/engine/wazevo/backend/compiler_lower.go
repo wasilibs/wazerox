@@ -60,7 +60,7 @@ func (c *compiler) lowerBlock(blk ssa.BasicBlock) {
 	// Now start lowering the non-branching instructions.
 	for ; cur != nil; cur = cur.Prev() {
 		c.setCurrentGroupID(cur.GroupID())
-		if c.alreadyLowered[cur] {
+		if cur.Lowered() {
 			continue
 		}
 
@@ -138,6 +138,7 @@ func (c *compiler) lowerBlockArguments(args []ssa.Value, succ ssa.BasicBlock) {
 	}
 
 	c.varEdges = c.varEdges[:0]
+	c.varEdgeTypes = c.varEdgeTypes[:0]
 	c.constEdges = c.constEdges[:0]
 	for i := 0; i < len(args); i++ {
 		dst := succ.Param(i)
@@ -152,49 +153,61 @@ func (c *compiler) lowerBlockArguments(args []ssa.Value, succ ssa.BasicBlock) {
 			}{cInst: srcDef.Instr, dst: dstReg})
 		} else {
 			srcReg := c.VRegOf(src)
-			if srcReg != dstReg { // Self-assignment can be no-op. This happens when, for example, passing a param as-is to the loop from the body.
-				c.varEdges = append(c.varEdges, [2]regalloc.VReg{srcReg, dstReg})
-			}
+			// Even when the src=dst, insert the move so that we can keep such registers keep-alive.
+			c.varEdges = append(c.varEdges, [2]regalloc.VReg{srcReg, dstReg})
+			c.varEdgeTypes = append(c.varEdgeTypes, src.Type())
 		}
 	}
 
 	// Check if there's an overlap among the dsts and srcs in varEdges.
-	c.resetVRegSet()
+	c.vRegIDs = c.vRegIDs[:0]
 	for _, edge := range c.varEdges {
-		src := edge[0]
+		src := edge[0].ID()
+		if int(src) >= len(c.vRegSet) {
+			c.vRegSet = append(c.vRegSet, make([]bool, src+1)...)
+		}
 		c.vRegSet[src] = true
+		c.vRegIDs = append(c.vRegIDs, src)
 	}
 	separated := true
 	for _, edge := range c.varEdges {
-		dst := edge[1]
-		if c.vRegSet[dst] {
-			separated = false
-			break
+		dst := edge[1].ID()
+		if int(dst) >= len(c.vRegSet) {
+			c.vRegSet = append(c.vRegSet, make([]bool, dst+1)...)
+		} else {
+			if c.vRegSet[dst] {
+				separated = false
+				break
+			}
 		}
+	}
+	for _, id := range c.vRegIDs {
+		c.vRegSet[id] = false // reset for the next use.
 	}
 
 	if separated {
 		// If there's no overlap, we can simply move the source to destination.
-		for _, edge := range c.varEdges {
+		for i, edge := range c.varEdges {
 			src, dst := edge[0], edge[1]
-			c.mach.InsertMove(dst, src)
+			c.mach.InsertMove(dst, src, c.varEdgeTypes[i])
 		}
 	} else {
 		// Otherwise, we allocate a temporary registers and move the source to the temporary register,
 		//
 		// First move all of them to temporary registers.
 		c.tempRegs = c.tempRegs[:0]
-		for _, edge := range c.varEdges {
+		for i, edge := range c.varEdges {
 			src := edge[0]
-			temp := c.AllocateVReg(src.RegType())
+			typ := c.varEdgeTypes[i]
+			temp := c.AllocateVReg(typ)
 			c.tempRegs = append(c.tempRegs, temp)
-			c.mach.InsertMove(temp, src)
+			c.mach.InsertMove(temp, src, typ)
 		}
 		// Then move the temporary registers to the destination.
 		for i, edge := range c.varEdges {
 			temp := c.tempRegs[i]
 			dst := edge[1]
-			c.mach.InsertMove(dst, temp)
+			c.mach.InsertMove(dst, temp, c.varEdgeTypes[i])
 		}
 	}
 

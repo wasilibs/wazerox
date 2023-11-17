@@ -119,13 +119,17 @@ spectest_v1_testdata_dir := $(spectest_v1_dir)/testdata
 spec_version_v1 := wg-1.0
 spectest_v2_dir := $(spectest_base_dir)/v2
 spectest_v2_testdata_dir := $(spectest_v2_dir)/testdata
-# Latest draft state as of May 23, 2023.
-spec_version_v2 := 2e8912e88a3118a46b90e8ccb659e24b4e8f3c23
+# Latest draft state as of Dec 16, 2022.
+spec_version_v2 := 1782235239ddebaf2cb079b00fdaa2d2c4dedba3
+spectest_threads_dir := $(spectest_base_dir)/threads
+spectest_threads_testdata_dir := $(spectest_threads_dir)/testdata
+spec_version_threads := cc01bf0d17ba3fb1dc59fb7c5c725838aff18b50
 
 .PHONY: build.spectest
 build.spectest:
 	@$(MAKE) build.spectest.v1
 	@$(MAKE) build.spectest.v2
+	@$(MAKE) build.spectest.threads
 
 .PHONY: build.spectest.v1
 build.spectest.v1: # Note: wabt by default uses >1.0 features, so wast2json flags might drift as they include more. See WebAssembly/wabt#1878
@@ -165,9 +169,21 @@ build.spectest.v2: # Note: SIMD cases are placed in the "simd" subdirectory.
 		wast2json --debug-names --no-check $$f; \
 	done
 
+.PHONY: build.spectest.threads
+build.spectest.threads:
+	@mkdir -p $(spectest_threads_testdata_dir)
+	@cd $(spectest_threads_testdata_dir) \
+		&& curl -sSL 'https://api.github.com/repos/WebAssembly/threads/contents/test/core?ref=$(spec_version_threads)' | jq -r '.[]| .download_url' | grep -E "atomic.wast" | xargs -Iurl curl -sJL url -O
+# Fix broken CAS spectests
+# https://github.com/WebAssembly/threads/issues/195#issuecomment-1318429506
+	@cd $(spectest_threads_testdata_dir) && patch < ../atomic.wast.patch
+	@cd $(spectest_threads_testdata_dir) && for f in `find . -name '*.wast'`; do \
+		wast2json --enable-threads --debug-names $$f; \
+	done
+
 .PHONY: test
 test:
-	@go test $(go_test_options) $$(go list ./... | grep -vE '$(spectest_v1_dir)|$(spectest_v2_dir)')
+	@go test $(go_test_options) $$(go list ./... | grep -vE '$(spectest_v1_dir)|$(spectest_v2_dir)|$(spectest_threads_dir)')
 	@cd internal/version/testdata && go test $(go_test_options) ./...
 
 .PHONY: coverage
@@ -181,12 +197,16 @@ coverage: ## Generate test coverage
 spectest:
 	@$(MAKE) spectest.v1
 	@$(MAKE) spectest.v2
+	@$(MAKE) spectest.threads
 
 spectest.v1:
 	@go test $(go_test_options) $$(go list ./... | grep $(spectest_v1_dir))
 
 spectest.v2:
 	@go test $(go_test_options) $$(go list ./... | grep $(spectest_v2_dir))
+
+spectest.threads:
+	@go test $(go_test_options) $$(go list ./... | grep $(spectest_threads_dir))
 
 golangci_lint_path := $(shell go env GOPATH)/bin/golangci-lint
 
@@ -218,6 +238,8 @@ check:
 	@GOARCH=wasm GOOS=js go build ./...
 # Ensure we build on gojs. See #1526.
 	@GOARCH=wasm GOOS=wasip1 go build ./...
+# Ensure we build on aix. See #1723
+	@GOARCH=ppc64 GOOS=aix go build ./...
 # Ensure we build on windows:
 	@GOARCH=amd64 GOOS=windows go build ./...
 # Ensure we build on an arbitrary operating system:
@@ -256,9 +278,9 @@ clean: ## Ensure a clean build
 fuzz_timeout_seconds ?= 10
 .PHONY: fuzz
 fuzz:
-	@cd internal/integration_test/fuzz && cargo fuzz run basic -- -rss_limit_mb=8192 -max_total_time=$(fuzz_timeout_seconds)
-	@cd internal/integration_test/fuzz && cargo fuzz run memory_no_diff -- -rss_limit_mb=8192 -max_total_time=$(fuzz_timeout_seconds)
-	@cd internal/integration_test/fuzz && cargo fuzz run validation -- -rss_limit_mb=8192 -max_total_time=$(fuzz_timeout_seconds)
+	@cd internal/integration_test/fuzz && cargo fuzz run no_diff --sanitizer=none -- -rss_limit_mb=8192 -max_total_time=$(fuzz_timeout_seconds)
+	@cd internal/integration_test/fuzz && cargo fuzz run memory_no_diff --sanitizer=none -- -rss_limit_mb=8192 -max_total_time=$(fuzz_timeout_seconds)
+	@cd internal/integration_test/fuzz && cargo fuzz run validation --sanitizer=none -- -rss_limit_mb=8192 -max_total_time=$(fuzz_timeout_seconds)
 
 #### CLI release related ####
 

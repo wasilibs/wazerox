@@ -21,20 +21,35 @@ type (
 	//
 	// TODO: optimize the layout later once the impl settles.
 	instruction struct {
-		kind               instructionKind
-		prev, next         *instruction
-		u1, u2, u3         uint64
-		rd, rm, rn, ra     operand
-		amode              addressMode
-		abi                *abiImpl
-		targets            []uint32
-		addedAfterLowering bool
+		kind                instructionKind
+		prev, next          *instruction
+		u1, u2, u3          uint64
+		rd, rm, rn, ra      operand
+		amode               addressMode
+		abi                 *abiImpl
+		targets             []uint32
+		addedBeforeRegAlloc bool
 	}
 
 	// instructionKind represents the kind of instruction.
 	// This controls how the instruction struct is interpreted.
 	instructionKind int
 )
+
+// IsCall implements regalloc.Instr IsCall.
+func (i *instruction) IsCall() bool {
+	return i.kind == call
+}
+
+// IsIndirectCall implements regalloc.Instr IsIndirectCall.
+func (i *instruction) IsIndirectCall() bool {
+	return i.kind == callInd
+}
+
+// IsReturn implements regalloc.Instr IsReturn.
+func (i *instruction) IsReturn() bool {
+	return i.kind == ret
+}
 
 type defKind byte
 
@@ -45,84 +60,100 @@ const (
 )
 
 var defKinds = [numInstructionKinds]defKind{
-	aluRRR:          defKindRD,
-	aluRRRR:         defKindRD,
-	aluRRImm12:      defKindRD,
-	aluRRBitmaskImm: defKindRD,
-	aluRRRShift:     defKindRD,
-	aluRRImmShift:   defKindRD,
-	aluRRRExtend:    defKindRD,
-	bitRR:           defKindRD,
-	movZ:            defKindRD,
-	movK:            defKindRD,
-	movN:            defKindRD,
-	mov32:           defKindRD,
-	mov64:           defKindRD,
-	fpuMov64:        defKindRD,
-	fpuMov128:       defKindRD,
-	fpuRR:           defKindRD,
-	fpuRRR:          defKindRD,
-	nop0:            defKindNone,
-	call:            defKindCall,
-	callInd:         defKindCall,
-	ret:             defKindNone,
-	store8:          defKindNone,
-	store16:         defKindNone,
-	store32:         defKindNone,
-	store64:         defKindNone,
-	exitSequence:    defKindNone,
-	condBr:          defKindNone,
-	br:              defKindNone,
-	brTableSequence: defKindNone,
-	cSet:            defKindRD,
-	extend:          defKindRD,
-	fpuCmp:          defKindNone,
-	uLoad8:          defKindRD,
-	uLoad16:         defKindRD,
-	uLoad32:         defKindRD,
-	sLoad8:          defKindRD,
-	sLoad16:         defKindRD,
-	sLoad32:         defKindRD,
-	uLoad64:         defKindRD,
-	fpuLoad32:       defKindRD,
-	fpuLoad64:       defKindRD,
-	fpuLoad128:      defKindRD,
-	loadFpuConst32:  defKindRD,
-	loadFpuConst64:  defKindRD,
-	fpuStore32:      defKindNone,
-	fpuStore64:      defKindNone,
-	fpuStore128:     defKindNone,
-	udf:             defKindNone,
-	cSel:            defKindRD,
-	fpuCSel:         defKindRD,
-	movToVec:        defKindRD,
-	movFromVec:      defKindRD,
-	vecMisc:         defKindRD,
-	vecLanes:        defKindRD,
-	vecRRR:          defKindRD,
-	fpuToInt:        defKindRD,
-	intToFpu:        defKindRD,
-	cCmpImm:         defKindNone,
-	movToFPSR:       defKindNone,
-	movFromFPSR:     defKindRD,
+	adr:                  defKindRD,
+	aluRRR:               defKindRD,
+	aluRRRR:              defKindRD,
+	aluRRImm12:           defKindRD,
+	aluRRBitmaskImm:      defKindRD,
+	aluRRRShift:          defKindRD,
+	aluRRImmShift:        defKindRD,
+	aluRRRExtend:         defKindRD,
+	bitRR:                defKindRD,
+	movZ:                 defKindRD,
+	movK:                 defKindRD,
+	movN:                 defKindRD,
+	mov32:                defKindRD,
+	mov64:                defKindRD,
+	fpuMov64:             defKindRD,
+	fpuMov128:            defKindRD,
+	fpuRR:                defKindRD,
+	fpuRRR:               defKindRD,
+	nop0:                 defKindNone,
+	call:                 defKindCall,
+	callInd:              defKindCall,
+	ret:                  defKindNone,
+	store8:               defKindNone,
+	store16:              defKindNone,
+	store32:              defKindNone,
+	store64:              defKindNone,
+	exitSequence:         defKindNone,
+	condBr:               defKindNone,
+	br:                   defKindNone,
+	brTableSequence:      defKindNone,
+	cSet:                 defKindRD,
+	extend:               defKindRD,
+	fpuCmp:               defKindNone,
+	uLoad8:               defKindRD,
+	uLoad16:              defKindRD,
+	uLoad32:              defKindRD,
+	sLoad8:               defKindRD,
+	sLoad16:              defKindRD,
+	sLoad32:              defKindRD,
+	uLoad64:              defKindRD,
+	fpuLoad32:            defKindRD,
+	fpuLoad64:            defKindRD,
+	fpuLoad128:           defKindRD,
+	vecLoad1R:            defKindRD,
+	loadFpuConst32:       defKindRD,
+	loadFpuConst64:       defKindRD,
+	loadFpuConst128:      defKindRD,
+	fpuStore32:           defKindNone,
+	fpuStore64:           defKindNone,
+	fpuStore128:          defKindNone,
+	udf:                  defKindNone,
+	cSel:                 defKindRD,
+	fpuCSel:              defKindRD,
+	movToVec:             defKindRD,
+	movFromVec:           defKindRD,
+	movFromVecSigned:     defKindRD,
+	vecDup:               defKindRD,
+	vecDupElement:        defKindRD,
+	vecExtract:           defKindRD,
+	vecMisc:              defKindRD,
+	vecMovElement:        defKindRD,
+	vecLanes:             defKindRD,
+	vecShiftImm:          defKindRD,
+	vecTbl:               defKindRD,
+	vecTbl2:              defKindRD,
+	vecPermute:           defKindRD,
+	vecRRR:               defKindRD,
+	vecRRRRewrite:        defKindNone,
+	fpuToInt:             defKindRD,
+	intToFpu:             defKindRD,
+	cCmpImm:              defKindNone,
+	movToFPSR:            defKindNone,
+	movFromFPSR:          defKindRD,
+	emitSourceOffsetInfo: defKindNone,
 }
 
-// defs returns the list of regalloc.VReg that are defined by the instruction.
+// Defs returns the list of regalloc.VReg that are defined by the instruction.
 // In order to reduce the number of allocations, the caller can pass the slice to be used.
-func (i *instruction) defs(regs []regalloc.VReg) []regalloc.VReg {
+func (i *instruction) Defs(regs *[]regalloc.VReg) []regalloc.VReg {
+	*regs = (*regs)[:0]
 	switch defKinds[i.kind] {
 	case defKindNone:
 	case defKindRD:
-		regs = append(regs, i.rd.nr())
+		*regs = append(*regs, i.rd.nr())
 	case defKindCall:
-		regs = append(regs, i.abi.retRealRegs...)
+		*regs = append(*regs, i.abi.retRealRegs...)
 	default:
 		panic(fmt.Sprintf("defKind for %v not defined", i))
 	}
-	return regs
+	return *regs
 }
 
-func (i *instruction) assignDef(reg regalloc.VReg) {
+// AssignDef implements regalloc.Instr AssignDef.
+func (i *instruction) AssignDef(reg regalloc.VReg) {
 	switch defKinds[i.kind] {
 	case defKindNone:
 	case defKindRD:
@@ -141,137 +172,166 @@ const (
 	useKindRN
 	useKindRNRM
 	useKindRNRMRA
+	useKindRNRN1RM
 	useKindRet
 	useKindCall
 	useKindCallInd
 	useKindAMode
 	useKindRNAMode
 	useKindCond
+	useKindVecRRRRewrite
 )
 
 var useKinds = [numInstructionKinds]useKind{
-	udf:             useKindNone,
-	aluRRR:          useKindRNRM,
-	aluRRRR:         useKindRNRMRA,
-	aluRRImm12:      useKindRN,
-	aluRRBitmaskImm: useKindRN,
-	aluRRRShift:     useKindRNRM,
-	aluRRImmShift:   useKindRN,
-	aluRRRExtend:    useKindRNRM,
-	bitRR:           useKindRN,
-	movZ:            useKindNone,
-	movK:            useKindNone,
-	movN:            useKindNone,
-	mov32:           useKindRN,
-	mov64:           useKindRN,
-	fpuMov64:        useKindRN,
-	fpuMov128:       useKindRN,
-	fpuRR:           useKindRN,
-	fpuRRR:          useKindRNRM,
-	nop0:            useKindNone,
-	call:            useKindCall,
-	callInd:         useKindCallInd,
-	ret:             useKindRet,
-	store8:          useKindRNAMode,
-	store16:         useKindRNAMode,
-	store32:         useKindRNAMode,
-	store64:         useKindRNAMode,
-	exitSequence:    useKindRN,
-	condBr:          useKindCond,
-	br:              useKindNone,
-	brTableSequence: useKindRN,
-	cSet:            useKindNone,
-	extend:          useKindRN,
-	fpuCmp:          useKindRNRM,
-	uLoad8:          useKindAMode,
-	uLoad16:         useKindAMode,
-	uLoad32:         useKindAMode,
-	sLoad8:          useKindAMode,
-	sLoad16:         useKindAMode,
-	sLoad32:         useKindAMode,
-	uLoad64:         useKindAMode,
-	fpuLoad32:       useKindAMode,
-	fpuLoad64:       useKindAMode,
-	fpuLoad128:      useKindAMode,
-	fpuStore32:      useKindRNAMode,
-	fpuStore64:      useKindRNAMode,
-	fpuStore128:     useKindRNAMode,
-	loadFpuConst32:  useKindNone,
-	loadFpuConst64:  useKindNone,
-	cSel:            useKindRNRM,
-	fpuCSel:         useKindRNRM,
-	movToVec:        useKindRN,
-	movFromVec:      useKindRN,
-	cCmpImm:         useKindRN,
-	vecMisc:         useKindRN,
-	vecLanes:        useKindRN,
-	vecRRR:          useKindRNRM,
-	fpuToInt:        useKindRN,
-	intToFpu:        useKindRN,
-	movToFPSR:       useKindRN,
-	movFromFPSR:     useKindNone,
+	udf:                  useKindNone,
+	aluRRR:               useKindRNRM,
+	aluRRRR:              useKindRNRMRA,
+	aluRRImm12:           useKindRN,
+	aluRRBitmaskImm:      useKindRN,
+	aluRRRShift:          useKindRNRM,
+	aluRRImmShift:        useKindRN,
+	aluRRRExtend:         useKindRNRM,
+	bitRR:                useKindRN,
+	movZ:                 useKindNone,
+	movK:                 useKindNone,
+	movN:                 useKindNone,
+	mov32:                useKindRN,
+	mov64:                useKindRN,
+	fpuMov64:             useKindRN,
+	fpuMov128:            useKindRN,
+	fpuRR:                useKindRN,
+	fpuRRR:               useKindRNRM,
+	nop0:                 useKindNone,
+	call:                 useKindCall,
+	callInd:              useKindCallInd,
+	ret:                  useKindRet,
+	store8:               useKindRNAMode,
+	store16:              useKindRNAMode,
+	store32:              useKindRNAMode,
+	store64:              useKindRNAMode,
+	exitSequence:         useKindRN,
+	condBr:               useKindCond,
+	br:                   useKindNone,
+	brTableSequence:      useKindRN,
+	cSet:                 useKindNone,
+	extend:               useKindRN,
+	fpuCmp:               useKindRNRM,
+	uLoad8:               useKindAMode,
+	uLoad16:              useKindAMode,
+	uLoad32:              useKindAMode,
+	sLoad8:               useKindAMode,
+	sLoad16:              useKindAMode,
+	sLoad32:              useKindAMode,
+	uLoad64:              useKindAMode,
+	fpuLoad32:            useKindAMode,
+	fpuLoad64:            useKindAMode,
+	fpuLoad128:           useKindAMode,
+	fpuStore32:           useKindRNAMode,
+	fpuStore64:           useKindRNAMode,
+	fpuStore128:          useKindRNAMode,
+	loadFpuConst32:       useKindNone,
+	loadFpuConst64:       useKindNone,
+	loadFpuConst128:      useKindNone,
+	vecLoad1R:            useKindRN,
+	cSel:                 useKindRNRM,
+	fpuCSel:              useKindRNRM,
+	movToVec:             useKindRN,
+	movFromVec:           useKindRN,
+	movFromVecSigned:     useKindRN,
+	vecDup:               useKindRN,
+	vecDupElement:        useKindRN,
+	vecExtract:           useKindRNRM,
+	cCmpImm:              useKindRN,
+	vecMisc:              useKindRN,
+	vecMovElement:        useKindRN,
+	vecLanes:             useKindRN,
+	vecShiftImm:          useKindRN,
+	vecTbl:               useKindRNRM,
+	vecTbl2:              useKindRNRN1RM,
+	vecRRR:               useKindRNRM,
+	vecRRRRewrite:        useKindVecRRRRewrite,
+	vecPermute:           useKindRNRM,
+	fpuToInt:             useKindRN,
+	intToFpu:             useKindRN,
+	movToFPSR:            useKindRN,
+	movFromFPSR:          useKindNone,
+	adr:                  useKindNone,
+	emitSourceOffsetInfo: useKindNone,
 }
 
-// uses returns the list of regalloc.VReg that are used by the instruction.
+// Uses returns the list of regalloc.VReg that are used by the instruction.
 // In order to reduce the number of allocations, the caller can pass the slice to be used.
-func (i *instruction) uses(regs []regalloc.VReg) []regalloc.VReg {
+func (i *instruction) Uses(regs *[]regalloc.VReg) []regalloc.VReg {
+	*regs = (*regs)[:0]
 	switch useKinds[i.kind] {
 	case useKindNone:
 	case useKindRN:
 		if rn := i.rn.reg(); rn.Valid() {
-			regs = append(regs, rn)
+			*regs = append(*regs, rn)
 		}
 	case useKindRNRM:
 		if rn := i.rn.reg(); rn.Valid() {
-			regs = append(regs, rn)
+			*regs = append(*regs, rn)
 		}
 		if rm := i.rm.reg(); rm.Valid() {
-			regs = append(regs, rm)
+			*regs = append(*regs, rm)
 		}
 	case useKindRNRMRA:
 		if rn := i.rn.reg(); rn.Valid() {
-			regs = append(regs, rn)
+			*regs = append(*regs, rn)
 		}
 		if rm := i.rm.reg(); rm.Valid() {
-			regs = append(regs, rm)
+			*regs = append(*regs, rm)
 		}
 		if ra := i.ra.reg(); ra.Valid() {
-			regs = append(regs, ra)
+			*regs = append(*regs, ra)
+		}
+	case useKindRNRN1RM:
+		if rn := i.rn.reg(); rn.Valid() && rn.IsRealReg() {
+			rn1 := regalloc.FromRealReg(rn.RealReg()+1, rn.RegType())
+			*regs = append(*regs, rn, rn1)
+		}
+		if rm := i.rm.reg(); rm.Valid() {
+			*regs = append(*regs, rm)
 		}
 	case useKindRet:
-		regs = append(regs, i.abi.retRealRegs...)
+		*regs = append(*regs, i.abi.retRealRegs...)
 	case useKindAMode:
 		if amodeRN := i.amode.rn; amodeRN.Valid() {
-			regs = append(regs, amodeRN)
+			*regs = append(*regs, amodeRN)
 		}
 		if amodeRM := i.amode.rm; amodeRM.Valid() {
-			regs = append(regs, amodeRM)
+			*regs = append(*regs, amodeRM)
 		}
 	case useKindRNAMode:
-		regs = append(regs, i.rn.reg())
+		*regs = append(*regs, i.rn.reg())
 		if amodeRN := i.amode.rn; amodeRN.Valid() {
-			regs = append(regs, amodeRN)
+			*regs = append(*regs, amodeRN)
 		}
 		if amodeRM := i.amode.rm; amodeRM.Valid() {
-			regs = append(regs, amodeRM)
+			*regs = append(*regs, amodeRM)
 		}
 	case useKindCond:
 		cnd := cond(i.u1)
 		if cnd.kind() != condKindCondFlagSet {
-			regs = append(regs, cnd.register())
+			*regs = append(*regs, cnd.register())
 		}
 	case useKindCall:
-		regs = append(regs, i.abi.argRealRegs...)
+		*regs = append(*regs, i.abi.argRealRegs...)
 	case useKindCallInd:
-		regs = append(regs, i.rn.nr())
-		regs = append(regs, i.abi.argRealRegs...)
+		*regs = append(*regs, i.rn.nr())
+		*regs = append(*regs, i.abi.argRealRegs...)
+	case useKindVecRRRRewrite:
+		*regs = append(*regs, i.rn.reg())
+		*regs = append(*regs, i.rm.reg())
+		*regs = append(*regs, i.rd.reg())
 	default:
 		panic(fmt.Sprintf("useKind for %v not defined", i))
 	}
-	return regs
+	return *regs
 }
 
-func (i *instruction) assignUse(index int, reg regalloc.VReg) {
+func (i *instruction) AssignUse(index int, reg regalloc.VReg) {
 	switch useKinds[i.kind] {
 	case useKindNone:
 	case useKindRN:
@@ -282,6 +342,33 @@ func (i *instruction) assignUse(index int, reg regalloc.VReg) {
 		if index == 0 {
 			if rn := i.rn.reg(); rn.Valid() {
 				i.rn = i.rn.assignReg(reg)
+			}
+		} else {
+			if rm := i.rm.reg(); rm.Valid() {
+				i.rm = i.rm.assignReg(reg)
+			}
+		}
+	case useKindVecRRRRewrite:
+		if index == 0 {
+			if rn := i.rn.reg(); rn.Valid() {
+				i.rn = i.rn.assignReg(reg)
+			}
+		} else if index == 1 {
+			if rm := i.rm.reg(); rm.Valid() {
+				i.rm = i.rm.assignReg(reg)
+			}
+		} else {
+			if rd := i.rd.reg(); rd.Valid() {
+				i.rd = i.rd.assignReg(reg)
+			}
+		}
+	case useKindRNRN1RM:
+		if index == 0 {
+			if rn := i.rn.reg(); rn.Valid() {
+				i.rn = i.rn.assignReg(reg)
+			}
+			if rn1 := i.rn.reg() + 1; rn1.Valid() {
+				i.rm = i.rm.assignReg(reg + 1)
 			}
 		} else {
 			if rm := i.rm.reg(); rm.Valid() {
@@ -320,10 +407,14 @@ func (i *instruction) assignUse(index int, reg regalloc.VReg) {
 		} else if index == 1 {
 			if amodeRN := i.amode.rn; amodeRN.Valid() {
 				i.amode.rn = reg
+			} else {
+				panic("BUG")
 			}
 		} else {
 			if amodeRM := i.amode.rm; amodeRM.Valid() {
 				i.amode.rm = reg
+			} else {
+				panic("BUG")
 			}
 		}
 	case useKindCond:
@@ -347,11 +438,6 @@ func (i *instruction) asCall(ref ssa.FuncRef, abi *abiImpl) {
 	i.kind = call
 	i.u1 = uint64(ref)
 	i.abi = abi
-}
-
-func (i *instruction) asCallImm(imm int64) {
-	i.kind = call
-	i.u2 = uint64(imm)
 }
 
 func (i *instruction) asCallIndirect(ptr regalloc.VReg, abi *abiImpl) {
@@ -397,8 +483,18 @@ func (i *instruction) asMOVN(dst regalloc.VReg, imm uint64, shift uint64, dst64b
 	}
 }
 
-func (i *instruction) asNop0() {
+func (i *instruction) asNop0() *instruction {
 	i.kind = nop0
+	return i
+}
+
+func (i *instruction) asNop0WithLabel(l label) {
+	i.kind = nop0
+	i.u1 = uint64(l)
+}
+
+func (i *instruction) nop0Label() label {
+	return label(i.u1)
 }
 
 func (i *instruction) asRet(abi *abiImpl) {
@@ -488,10 +584,22 @@ func (i *instruction) asFpuLoad(dst operand, amode addressMode, sizeInBits byte)
 	i.amode = amode
 }
 
-func (i *instruction) asCSet(rd regalloc.VReg, c condFlag) {
+func (i *instruction) asVecLoad1R(rd, rn operand, arr vecArrangement) {
+	// NOTE: currently only has support for no-offset loads, though it is suspicious that
+	// we would need to support offset load (that is only available for post-index).
+	i.kind = vecLoad1R
+	i.rd = rd
+	i.rn = rn
+	i.u1 = uint64(arr)
+}
+
+func (i *instruction) asCSet(rd regalloc.VReg, mask bool, c condFlag) {
 	i.kind = cSet
 	i.rd = operandNR(rd)
 	i.u1 = uint64(c)
+	if mask {
+		i.u2 = 1
+	}
 }
 
 func (i *instruction) asCSel(rd, rn, rm operand, c condFlag, _64bit bool) {
@@ -597,6 +705,13 @@ func (i *instruction) asLoadFpuConst64(rd regalloc.VReg, raw uint64) {
 	i.rd = operandNR(rd)
 }
 
+func (i *instruction) asLoadFpuConst128(rd regalloc.VReg, lo, hi uint64) {
+	i.kind = loadFpuConst128
+	i.u1 = lo
+	i.u2 = hi
+	i.rd = operandNR(rd)
+}
+
 func (i *instruction) asFpuCmp(rn, rm operand, is64bit bool) {
 	i.kind = fpuCmp
 	i.rn, i.rm = rn, rm
@@ -664,7 +779,7 @@ func (i *instruction) asALUShift(aluOp aluOp, rd, rn, rm operand, dst64bit bool)
 	}
 }
 
-func (i *instruction) asALUBitmaskImm(aluOp aluOp, rn, rd regalloc.VReg, imm uint64, dst64bit bool) {
+func (i *instruction) asALUBitmaskImm(aluOp aluOp, rd, rn regalloc.VReg, imm uint64, dst64bit bool) {
 	i.kind = aluRRBitmaskImm
 	i.u1 = uint64(aluOp)
 	i.rn, i.rd = operandNR(rn), operandNR(rd)
@@ -726,9 +841,10 @@ func (i *instruction) asMove32(rd, rn regalloc.VReg) {
 	i.rn, i.rd = operandNR(rn), operandNR(rd)
 }
 
-func (i *instruction) asMove64(rd, rn regalloc.VReg) {
+func (i *instruction) asMove64(rd, rn regalloc.VReg) *instruction {
 	i.kind = mov64
 	i.rn, i.rd = operandNR(rn), operandNR(rd)
+	return i
 }
 
 func (i *instruction) asFpuMov64(rd, rn regalloc.VReg) {
@@ -736,9 +852,10 @@ func (i *instruction) asFpuMov64(rd, rn regalloc.VReg) {
 	i.rn, i.rd = operandNR(rn), operandNR(rd)
 }
 
-func (i *instruction) asFpuMov128(rd, rn regalloc.VReg) {
+func (i *instruction) asFpuMov128(rd, rn regalloc.VReg) *instruction {
 	i.kind = fpuMov128
 	i.rn, i.rd = operandNR(rn), operandNR(rd)
+	return i
 }
 
 func (i *instruction) asMovToVec(rd, rn operand, arr vecArrangement, index vecIndex) {
@@ -748,11 +865,42 @@ func (i *instruction) asMovToVec(rd, rn operand, arr vecArrangement, index vecIn
 	i.u1, i.u2 = uint64(arr), uint64(index)
 }
 
-func (i *instruction) asMovFromVec(rd, rn operand, arr vecArrangement, index vecIndex) {
-	i.kind = movFromVec
+func (i *instruction) asMovFromVec(rd, rn operand, arr vecArrangement, index vecIndex, signed bool) {
+	if signed {
+		i.kind = movFromVecSigned
+	} else {
+		i.kind = movFromVec
+	}
 	i.rd = rd
 	i.rn = rn
 	i.u1, i.u2 = uint64(arr), uint64(index)
+}
+
+func (i *instruction) asVecDup(rd, rn operand, arr vecArrangement) {
+	i.kind = vecDup
+	i.u1 = uint64(arr)
+	i.rn, i.rd = rn, rd
+}
+
+func (i *instruction) asVecDupElement(rd, rn operand, arr vecArrangement, index vecIndex) {
+	i.kind = vecDupElement
+	i.u1 = uint64(arr)
+	i.rn, i.rd = rn, rd
+	i.u2 = uint64(index)
+}
+
+func (i *instruction) asVecExtract(rd, rn, rm operand, arr vecArrangement, index uint32) {
+	i.kind = vecExtract
+	i.u1 = uint64(arr)
+	i.rn, i.rm, i.rd = rn, rm, rd
+	i.u2 = uint64(index)
+}
+
+func (i *instruction) asVecMovElement(rd, rn operand, arr vecArrangement, rdIndex, rnIndex vecIndex) {
+	i.kind = vecMovElement
+	i.u1 = uint64(arr)
+	i.u2, i.u3 = uint64(rdIndex), uint64(rnIndex)
+	i.rn, i.rd = rn, rd
 }
 
 func (i *instruction) asVecMisc(op vecOp, rd, rn operand, arr vecArrangement) {
@@ -769,6 +917,39 @@ func (i *instruction) asVecLanes(op vecOp, rd, rn operand, arr vecArrangement) {
 	i.u2 = uint64(arr)
 }
 
+func (i *instruction) asVecShiftImm(op vecOp, rd, rn, rm operand, arr vecArrangement) {
+	i.kind = vecShiftImm
+	i.u1 = uint64(op)
+	i.rn, i.rm, i.rd = rn, rm, rd
+	i.u2 = uint64(arr)
+}
+
+func (i *instruction) asVecTbl(nregs byte, rd, rn, rm operand, arr vecArrangement) {
+	switch nregs {
+	case 0, 1:
+		i.kind = vecTbl
+	case 2:
+		i.kind = vecTbl2
+		if !rn.reg().IsRealReg() {
+			panic("rn is not a RealReg")
+		}
+		if rn.realReg() == v31 {
+			panic("rn cannot be v31")
+		}
+	default:
+		panic(fmt.Sprintf("unsupported number of registers %d", nregs))
+	}
+	i.rn, i.rm, i.rd = rn, rm, rd
+	i.u2 = uint64(arr)
+}
+
+func (i *instruction) asVecPermute(op vecOp, rd, rn, rm operand, arr vecArrangement) {
+	i.kind = vecPermute
+	i.u1 = uint64(op)
+	i.rn, i.rm, i.rd = rn, rm, rd
+	i.u2 = uint64(arr)
+}
+
 func (i *instruction) asVecRRR(op vecOp, rd, rn, rm operand, arr vecArrangement) {
 	i.kind = vecRRR
 	i.u1 = uint64(op)
@@ -776,9 +957,20 @@ func (i *instruction) asVecRRR(op vecOp, rd, rn, rm operand, arr vecArrangement)
 	i.u2 = uint64(arr)
 }
 
-func (i *instruction) isCopy() bool {
+// asVecRRRRewrite encodes a vector instruction that rewrites the destination register.
+// IMPORTANT: the destination register must be already defined before this instruction.
+func (i *instruction) asVecRRRRewrite(op vecOp, rd, rn, rm operand, arr vecArrangement) {
+	i.kind = vecRRRRewrite
+	i.u1 = uint64(op)
+	i.rn, i.rd, i.rm = rn, rd, rm
+	i.u2 = uint64(arr)
+}
+
+func (i *instruction) IsCopy() bool {
 	op := i.kind
-	return op == mov64 || op == mov32 || op == fpuMov64 || op == fpuMov128
+	// We do not include mov32 as it is not a copy instruction in the sense that it does not preserve the upper 32 bits,
+	// and it is only used in the translation of IReduce, not the actual copy indeed.
+	return op == mov64 || op == fpuMov64 || op == fpuMov128
 }
 
 // String implements fmt.Stringer.
@@ -792,7 +984,12 @@ func (i *instruction) String() (str string) {
 
 	switch i.kind {
 	case nop0:
-		str = "nop0"
+		if i.u1 != 0 {
+			l := label(i.u1)
+			str = fmt.Sprintf("%s:", l)
+		} else {
+			str = "nop0"
+		}
 	case aluRRR:
 		size := is64SizeBitToSize(i.u3)
 		str = fmt.Sprintf("%s %s, %s, %s", aluOp(i.u1).String(),
@@ -916,7 +1113,11 @@ func (i *instruction) String() (str string) {
 			condFlag(i.u1),
 		)
 	case cSet:
-		str = fmt.Sprintf("cset %s, %s", formatVRegSized(i.rd.nr(), 64), condFlag(i.u1))
+		if i.u2 != 0 {
+			str = fmt.Sprintf("csetm %s, %s", formatVRegSized(i.rd.nr(), 64), condFlag(i.u1))
+		} else {
+			str = fmt.Sprintf("cset %s, %s", formatVRegSized(i.rd.nr(), 64), condFlag(i.u1))
+		}
 	case cCmpImm:
 		size := is64SizeBitToSize(i.u3)
 		str = fmt.Sprintf("ccmp %s, #%#x, #%#x, %s",
@@ -974,7 +1175,8 @@ func (i *instruction) String() (str string) {
 	case loadFpuConst64:
 		str = fmt.Sprintf("ldr %s, #8; b 16; data.f64 %f", formatVRegSized(i.rd.nr(), 64), math.Float64frombits(i.u1))
 	case loadFpuConst128:
-		panic("TODO")
+		str = fmt.Sprintf("ldr %s, #8; b 32; data.v128  %016x %016x",
+			formatVRegSized(i.rd.nr(), 128), i.u1, i.u2)
 	case fpuToInt:
 		var op, src, dst string
 		if signed := i.u1 == 1; signed {
@@ -1032,34 +1234,60 @@ func (i *instruction) String() (str string) {
 			panic("unsupported arrangement " + arr.String())
 		}
 		str = fmt.Sprintf("ins %s, %s", formatVRegVec(i.rd.nr(), arr, vecIndex(i.u2)), formatVRegSized(i.rn.nr(), size))
-	case movFromVec:
+	case movFromVec, movFromVecSigned:
 		var size byte
 		var opcode string
 		arr := vecArrangement(i.u1)
+		signed := i.kind == movFromVecSigned
 		switch arr {
 		case vecArrangementB, vecArrangementH, vecArrangementS:
 			size = 32
-			opcode = "umov"
+			if signed {
+				opcode = "smov"
+			} else {
+				opcode = "umov"
+			}
 		case vecArrangementD:
 			size = 64
-			opcode = "mov"
+			if signed {
+				opcode = "smov"
+			} else {
+				opcode = "mov"
+			}
 		default:
 			panic("unsupported arrangement " + arr.String())
 		}
 		str = fmt.Sprintf("%s %s, %s", opcode, formatVRegSized(i.rd.nr(), size), formatVRegVec(i.rn.nr(), arr, vecIndex(i.u2)))
-	case movFromVecSigned:
-		panic("TODO")
 	case vecDup:
-		panic("TODO")
+		str = fmt.Sprintf("dup %s, %s",
+			formatVRegVec(i.rd.nr(), vecArrangement(i.u1), vecIndexNone),
+			formatVRegSized(i.rn.nr(), 64),
+		)
+	case vecDupElement:
+		arr := vecArrangement(i.u1)
+		str = fmt.Sprintf("dup %s, %s",
+			formatVRegVec(i.rd.nr(), arr, vecIndexNone),
+			formatVRegVec(i.rn.nr(), arr, vecIndex(i.u2)),
+		)
 	case vecDupFromFpu:
 		panic("TODO")
+	case vecExtract:
+		str = fmt.Sprintf("ext %s, %s, %s, #%d",
+			formatVRegVec(i.rd.nr(), vecArrangement(i.u1), vecIndexNone),
+			formatVRegVec(i.rn.nr(), vecArrangement(i.u1), vecIndexNone),
+			formatVRegVec(i.rm.nr(), vecArrangement(i.u1), vecIndexNone),
+			uint32(i.u2),
+		)
 	case vecExtend:
 		panic("TODO")
 	case vecMovElement:
-		panic("TODO")
+		str = fmt.Sprintf("mov %s, %s",
+			formatVRegVec(i.rd.nr(), vecArrangement(i.u1), vecIndex(i.u2)),
+			formatVRegVec(i.rn.nr(), vecArrangement(i.u1), vecIndex(i.u3)),
+		)
 	case vecMiscNarrow:
 		panic("TODO")
-	case vecRRR:
+	case vecRRR, vecRRRRewrite:
 		str = fmt.Sprintf("%s %s, %s, %s",
 			vecOp(i.u1),
 			formatVRegVec(i.rd.nr(), vecArrangement(i.u2), vecIndexNone),
@@ -1067,10 +1295,17 @@ func (i *instruction) String() (str string) {
 			formatVRegVec(i.rm.nr(), vecArrangement(i.u2), vecIndexNone),
 		)
 	case vecMisc:
-		str = fmt.Sprintf("%s %s, %s",
-			vecOp(i.u1),
-			formatVRegVec(i.rd.nr(), vecArrangement(i.u2), vecIndexNone),
-			formatVRegVec(i.rn.nr(), vecArrangement(i.u2), vecIndexNone))
+		vop := vecOp(i.u1)
+		if vop == vecOpCmeq0 {
+			str = fmt.Sprintf("cmeq %s, %s, #0",
+				formatVRegVec(i.rd.nr(), vecArrangement(i.u2), vecIndexNone),
+				formatVRegVec(i.rn.nr(), vecArrangement(i.u2), vecIndexNone))
+		} else {
+			str = fmt.Sprintf("%s %s, %s",
+				vop,
+				formatVRegVec(i.rd.nr(), vecArrangement(i.u2), vecIndexNone),
+				formatVRegVec(i.rn.nr(), vecArrangement(i.u2), vecIndexNone))
+		}
 	case vecLanes:
 		arr := vecArrangement(i.u2)
 		var destArr vecArrangement
@@ -1088,10 +1323,35 @@ func (i *instruction) String() (str string) {
 			vecOp(i.u1),
 			formatVRegWidthVec(i.rd.nr(), destArr),
 			formatVRegVec(i.rn.nr(), arr, vecIndexNone))
+	case vecShiftImm:
+		arr := vecArrangement(i.u2)
+		str = fmt.Sprintf("%s %s, %s, #%d",
+			vecOp(i.u1),
+			formatVRegVec(i.rd.nr(), arr, vecIndexNone),
+			formatVRegVec(i.rn.nr(), arr, vecIndexNone),
+			i.rm.shiftImm())
 	case vecTbl:
-		panic("TODO")
+		arr := vecArrangement(i.u2)
+		str = fmt.Sprintf("tbl %s, { %s }, %s",
+			formatVRegVec(i.rd.nr(), arr, vecIndexNone),
+			formatVRegVec(i.rn.nr(), vecArrangement16B, vecIndexNone),
+			formatVRegVec(i.rm.nr(), arr, vecIndexNone))
 	case vecTbl2:
-		panic("TODO")
+		arr := vecArrangement(i.u2)
+		rd, rn, rm := i.rd.nr(), i.rn.nr(), i.rm.nr()
+		rn1 := regalloc.FromRealReg(rn.RealReg()+1, rn.RegType())
+		str = fmt.Sprintf("tbl %s, { %s, %s }, %s",
+			formatVRegVec(rd, arr, vecIndexNone),
+			formatVRegVec(rn, vecArrangement16B, vecIndexNone),
+			formatVRegVec(rn1, vecArrangement16B, vecIndexNone),
+			formatVRegVec(rm, arr, vecIndexNone))
+	case vecPermute:
+		arr := vecArrangement(i.u2)
+		str = fmt.Sprintf("%s %s, %s, %s",
+			vecOp(i.u1),
+			formatVRegVec(i.rd.nr(), arr, vecIndexNone),
+			formatVRegVec(i.rn.nr(), arr, vecIndexNone),
+			formatVRegVec(i.rm.nr(), arr, vecIndexNone))
 	case movToFPSR:
 		str = fmt.Sprintf("msr fpsr, %s", formatVRegSized(i.rn.nr(), 64))
 	case movFromFPSR:
@@ -1170,6 +1430,10 @@ func (i *instruction) String() (str string) {
 		str = fmt.Sprintf("exit_sequence %s", formatVRegSized(i.rn.nr(), 64))
 	case udf:
 		str = "udf"
+	case emitSourceOffsetInfo:
+		str = fmt.Sprintf("source_offset_info %d", ssa.SourceOffset(i.u1))
+	case vecLoad1R:
+		str = fmt.Sprintf("ld1r {%s}, [%s]", formatVRegVec(i.rd.nr(), vecArrangement(i.u1), vecIndexNone), formatVRegSized(i.rn.nr(), 64))
 	default:
 		panic(i.kind)
 	}
@@ -1280,6 +1544,8 @@ const (
 	loadFpuConst64
 	// loadFpuConst128 represents a load of a 128-bit floating-point constant.
 	loadFpuConst128
+	// vecLoad1R represents a load of a one single-element structure that replicates to all lanes of a vector.
+	vecLoad1R
 	// fpuToInt represents a conversion from FP to integer.
 	fpuToInt
 	// intToFpu represents a conversion from integer to FP.
@@ -1294,8 +1560,12 @@ const (
 	movFromVecSigned
 	// vecDup represents a duplication of general-purpose register to vector.
 	vecDup
+	// vecDupElement represents a duplication of a vector element to vector or scalar.
+	vecDupElement
 	// vecDupFromFpu represents a duplication of scalar to vector.
 	vecDupFromFpu
+	// vecExtract represents a vector extraction operation.
+	vecExtract
 	// vecExtend represents a vector extension operation.
 	vecExtend
 	// vecMovElement represents a move vector element to another vector element operation.
@@ -1304,14 +1574,23 @@ const (
 	vecMiscNarrow
 	// vecRRR represents a vector ALU operation.
 	vecRRR
+	// vecRRRRewrite is exactly the same as vecRRR except that this rewrites the destination register.
+	// For example, BSL instruction rewrites the destination register, and the existing value influences the result.
+	// Therefore, the "destination" register in vecRRRRewrite will be treated as "use" which makes the register outlive
+	// the instruction while this instruction doesn't have "def" in the context of register allocation.
+	vecRRRRewrite
 	// vecMisc represents a vector two register miscellaneous instruction.
 	vecMisc
 	// vecLanes represents a vector instruction across lanes.
 	vecLanes
+	// vecShiftImm represents a SIMD scalar shift by immediate instruction.
+	vecShiftImm
 	// vecTbl represents a table vector lookup - single register table.
 	vecTbl
 	// vecTbl2 represents a table vector lookup - two register table.
 	vecTbl2
+	// vecPermute represents a vector permute instruction.
+	vecPermute
 	// movToNZCV represents a move to the FPSR.
 	movToFPSR
 	// movFromNZCV represents a move from the FPSR.
@@ -1336,9 +1615,23 @@ const (
 	// UDF is the undefined instruction. For debugging only.
 	udf
 
+	// emitSourceOffsetInfo is a dummy instruction to emit source offset info.
+	// The existence of this instruction does not affect the execution.
+	emitSourceOffsetInfo
+
 	// ------------------- do not define below this line -------------------
 	numInstructionKinds
 )
+
+func (i *instruction) asEmitSourceOffsetInfo(l ssa.SourceOffset) *instruction {
+	i.kind = emitSourceOffsetInfo
+	i.u1 = uint64(l)
+	return i
+}
+
+func (i *instruction) sourceOffsetInfo() ssa.SourceOffset {
+	return ssa.SourceOffset(i.u1)
+}
 
 func (i *instruction) asUDF() *instruction {
 	i.kind = udf
@@ -1375,9 +1668,10 @@ func (i *instruction) asIntToFpu(rd, rn operand, rnSigned, src64bit, dst64bit bo
 	}
 }
 
-func (i *instruction) asExitSequence(ctx regalloc.VReg) {
+func (i *instruction) asExitSequence(ctx regalloc.VReg) *instruction {
 	i.kind = exitSequence
 	i.rn = operandNR(ctx)
+	return i
 }
 
 // aluOp determines the type of ALU operation. Instructions whose kind is one of
@@ -1475,18 +1769,208 @@ func (b vecOp) String() string {
 	switch b {
 	case vecOpCnt:
 		return "cnt"
+	case vecOpCmeq:
+		return "cmeq"
+	case vecOpCmgt:
+		return "cmgt"
+	case vecOpCmhi:
+		return "cmhi"
+	case vecOpCmge:
+		return "cmge"
+	case vecOpCmhs:
+		return "cmhs"
+	case vecOpFcmeq:
+		return "fcmeq"
+	case vecOpFcmgt:
+		return "fcmgt"
+	case vecOpFcmge:
+		return "fcmge"
+	case vecOpCmeq0:
+		return "cmeq0"
 	case vecOpUaddlv:
 		return "uaddlv"
 	case vecOpBit:
 		return "bit"
+	case vecOpBic:
+		return "bic"
+	case vecOpBsl:
+		return "bsl"
+	case vecOpNot:
+		return "not"
+	case vecOpAnd:
+		return "and"
+	case vecOpOrr:
+		return "orr"
+	case vecOpEOR:
+		return "eor"
+	case vecOpFadd:
+		return "fadd"
+	case vecOpAdd:
+		return "add"
+	case vecOpAddp:
+		return "addp"
+	case vecOpAddv:
+		return "addv"
+	case vecOpSub:
+		return "sub"
+	case vecOpFsub:
+		return "fsub"
+	case vecOpSmin:
+		return "smin"
+	case vecOpUmin:
+		return "umin"
+	case vecOpUminv:
+		return "uminv"
+	case vecOpSmax:
+		return "smax"
+	case vecOpUmax:
+		return "umax"
+	case vecOpUmaxp:
+		return "umaxp"
+	case vecOpUrhadd:
+		return "urhadd"
+	case vecOpFmul:
+		return "fmul"
+	case vecOpSqrdmulh:
+		return "sqrdmulh"
+	case vecOpMul:
+		return "mul"
+	case vecOpUmlal:
+		return "umlal"
+	case vecOpFdiv:
+		return "fdiv"
+	case vecOpFsqrt:
+		return "fsqrt"
+	case vecOpAbs:
+		return "abs"
+	case vecOpFabs:
+		return "fabs"
+	case vecOpNeg:
+		return "neg"
+	case vecOpFneg:
+		return "fneg"
+	case vecOpFrintp:
+		return "frintp"
+	case vecOpFrintm:
+		return "frintm"
+	case vecOpFrintn:
+		return "frintn"
+	case vecOpFrintz:
+		return "frintz"
+	case vecOpFcvtl:
+		return "fcvtl"
+	case vecOpFcvtn:
+		return "fcvtn"
+	case vecOpFcvtzu:
+		return "fcvtzu"
+	case vecOpFcvtzs:
+		return "fcvtzs"
+	case vecOpScvtf:
+		return "scvtf"
+	case vecOpUcvtf:
+		return "ucvtf"
+	case vecOpSqxtn:
+		return "sqxtn"
+	case vecOpUqxtn:
+		return "uqxtn"
+	case vecOpSqxtun:
+		return "sqxtun"
+	case vecOpRev64:
+		return "rev64"
+	case vecOpXtn:
+		return "xtn"
+	case vecOpShll:
+		return "shll"
+	case vecOpSshl:
+		return "sshl"
+	case vecOpSshll:
+		return "sshll"
+	case vecOpUshl:
+		return "ushl"
+	case vecOpUshll:
+		return "ushll"
+	case vecOpSshr:
+		return "sshr"
+	case vecOpZip1:
+		return "zip1"
+	case vecOpFmin:
+		return "fmin"
+	case vecOpFmax:
+		return "fmax"
 	}
 	panic(int(b))
 }
 
 const (
 	vecOpCnt vecOp = iota
+	vecOpCmeq0
+	vecOpCmeq
+	vecOpCmgt
+	vecOpCmhi
+	vecOpCmge
+	vecOpCmhs
+	vecOpFcmeq
+	vecOpFcmgt
+	vecOpFcmge
 	vecOpUaddlv
 	vecOpBit
+	vecOpBic
+	vecOpBsl
+	vecOpNot
+	vecOpAnd
+	vecOpOrr
+	vecOpEOR
+	vecOpAdd
+	vecOpFadd
+	vecOpAddv
+	vecOpSqadd
+	vecOpUqadd
+	vecOpAddp
+	vecOpSub
+	vecOpFsub
+	vecOpSqsub
+	vecOpUqsub
+	vecOpSmin
+	vecOpUmin
+	vecOpUminv
+	vecOpFmin
+	vecOpSmax
+	vecOpUmax
+	vecOpUmaxp
+	vecOpFmax
+	vecOpUrhadd
+	vecOpMul
+	vecOpFmul
+	vecOpSqrdmulh
+	vecOpUmlal
+	vecOpFdiv
+	vecOpFsqrt
+	vecOpAbs
+	vecOpFabs
+	vecOpNeg
+	vecOpFneg
+	vecOpFrintm
+	vecOpFrintn
+	vecOpFrintp
+	vecOpFrintz
+	vecOpFcvtl
+	vecOpFcvtn
+	vecOpFcvtzs
+	vecOpFcvtzu
+	vecOpScvtf
+	vecOpUcvtf
+	vecOpSqxtn
+	vecOpSqxtun
+	vecOpUqxtn
+	vecOpRev64
+	vecOpXtn
+	vecOpShll
+	vecOpSshl
+	vecOpSshll
+	vecOpUshl
+	vecOpUshll
+	vecOpSshr
+	vecOpZip1
 )
 
 // bitOp determines the type of bitwise operation. Instructions whose kind is one of
@@ -1738,17 +2222,7 @@ func (s shiftOp) String() string {
 	panic(int(s))
 }
 
-func binarySize(begin, end *instruction) (size int64) {
-	for cur := begin; ; cur = cur.next {
-		size += cur.size()
-		if cur == end {
-			break
-		}
-	}
-	return size
-}
-
-const exitSequenceSize = 5 * 4 // 5 instructions as in encodeExitSequence.
+const exitSequenceSize = 6 * 4 // 6 instructions as in encodeExitSequence.
 
 // size returns the size of the instruction in encoded bytes.
 func (i *instruction) size() int64 {
@@ -1757,12 +2231,23 @@ func (i *instruction) size() int64 {
 		return exitSequenceSize // 5 instructions as in encodeExitSequence.
 	case nop0:
 		return 0
+	case emitSourceOffsetInfo:
+		return 0
 	case loadFpuConst32:
+		if i.u1 == 0 {
+			return 4 // zero loading can be encoded as a single instruction.
+		}
 		return 4 + 4 + 4
 	case loadFpuConst64:
+		if i.u1 == 0 {
+			return 4 // zero loading can be encoded as a single instruction.
+		}
 		return 4 + 4 + 8
 	case loadFpuConst128:
-		return 4 + 4 + 12
+		if i.u1 == 0 && i.u2 == 0 {
+			return 4 // zero loading can be encoded as a single instruction.
+		}
+		return 4 + 4 + 16
 	case brTableSequence:
 		return 4*4 + int64(len(i.targets))*4
 	default:
@@ -1852,3 +2337,22 @@ type vecIndex byte
 
 // vecIndexNone indicates no vector index specified.
 const vecIndexNone = ^vecIndex(0)
+
+func ssaLaneToArrangement(lane ssa.VecLane) vecArrangement {
+	switch lane {
+	case ssa.VecLaneI8x16:
+		return vecArrangement16B
+	case ssa.VecLaneI16x8:
+		return vecArrangement8H
+	case ssa.VecLaneI32x4:
+		return vecArrangement4S
+	case ssa.VecLaneI64x2:
+		return vecArrangement2D
+	case ssa.VecLaneF32x4:
+		return vecArrangement4S
+	case ssa.VecLaneF64x2:
+		return vecArrangement2D
+	default:
+		panic(lane)
+	}
+}

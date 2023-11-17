@@ -19,11 +19,13 @@ func TestModuleEngine_setupOpaque(t *testing.T) {
 	}{
 		{
 			offset: wazevoapi.ModuleContextOffsetData{
-				LocalMemoryBegin:       10,
-				ImportedMemoryBegin:    -1,
-				ImportedFunctionsBegin: -1,
-				TablesBegin:            -1,
-				GlobalsBegin:           -1,
+				LocalMemoryBegin:                    10,
+				ImportedMemoryBegin:                 -1,
+				ImportedFunctionsBegin:              -1,
+				TablesBegin:                         -1,
+				BeforeListenerTrampolines1stElement: -1,
+				AfterListenerTrampolines1stElement:  -1,
+				GlobalsBegin:                        -1,
 			},
 			m: &wasm.ModuleInstance{MemoryInstance: &wasm.MemoryInstance{
 				Buffer: make([]byte, 0xff),
@@ -31,11 +33,13 @@ func TestModuleEngine_setupOpaque(t *testing.T) {
 		},
 		{
 			offset: wazevoapi.ModuleContextOffsetData{
-				LocalMemoryBegin:       -1,
-				ImportedMemoryBegin:    30,
-				GlobalsBegin:           -1,
-				TablesBegin:            -1,
-				ImportedFunctionsBegin: -1,
+				LocalMemoryBegin:                    -1,
+				ImportedMemoryBegin:                 30,
+				GlobalsBegin:                        -1,
+				TablesBegin:                         -1,
+				BeforeListenerTrampolines1stElement: -1,
+				AfterListenerTrampolines1stElement:  -1,
+				ImportedFunctionsBegin:              -1,
 			},
 			m: &wasm.ModuleInstance{MemoryInstance: &wasm.MemoryInstance{
 				Buffer: make([]byte, 0xff),
@@ -43,11 +47,13 @@ func TestModuleEngine_setupOpaque(t *testing.T) {
 		},
 		{
 			offset: wazevoapi.ModuleContextOffsetData{
-				LocalMemoryBegin:       -1,
-				ImportedMemoryBegin:    -1,
-				ImportedFunctionsBegin: -1,
-				GlobalsBegin:           30,
-				TablesBegin:            100,
+				LocalMemoryBegin:                    -1,
+				ImportedMemoryBegin:                 -1,
+				ImportedFunctionsBegin:              -1,
+				GlobalsBegin:                        30,
+				TablesBegin:                         100,
+				BeforeListenerTrampolines1stElement: 200,
+				AfterListenerTrampolines1stElement:  208,
 			},
 			m: &wasm.ModuleInstance{
 				Globals: []*wasm.GlobalInstance{{}, {}, {}, {}, {}, {}},
@@ -59,7 +65,11 @@ func TestModuleEngine_setupOpaque(t *testing.T) {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			tc.offset.TotalSize = 1000 // arbitrary large number to ensure we don't panic.
 			m := &moduleEngine{
-				parent: &compiledModule{offsets: tc.offset},
+				parent: &compiledModule{
+					offsets:                   tc.offset,
+					listenerBeforeTrampolines: make([]*byte, 100),
+					listenerAfterTrampolines:  make([]*byte, 200),
+				},
 				module: tc.m,
 				opaque: make([]byte, tc.offset.TotalSize),
 			}
@@ -107,6 +117,16 @@ func TestModuleEngine_setupOpaque(t *testing.T) {
 					require.Equal(t, expPtr, actualPtr)
 				}
 			}
+			if tc.offset.BeforeListenerTrampolines1stElement >= 0 {
+				actualPtr := uintptr(binary.LittleEndian.Uint64(m.opaque[int(tc.offset.BeforeListenerTrampolines1stElement):]))
+				expPtr := uintptr(unsafe.Pointer(&m.parent.listenerBeforeTrampolines[0]))
+				require.Equal(t, expPtr, actualPtr)
+			}
+			if tc.offset.AfterListenerTrampolines1stElement >= 0 {
+				actualPtr := uintptr(binary.LittleEndian.Uint64(m.opaque[int(tc.offset.AfterListenerTrampolines1stElement):]))
+				expPtr := uintptr(unsafe.Pointer(&m.parent.listenerAfterTrampolines[0]))
+				require.Equal(t, expPtr, actualPtr)
+			}
 		})
 	}
 }
@@ -125,8 +145,8 @@ func TestModuleEngine_ResolveImportedFunction(t *testing.T) {
 	im1 := &moduleEngine{
 		opaquePtr: &op1,
 		parent: &compiledModule{
-			executable:      make([]byte, 1000),
-			functionOffsets: []compiledFunctionOffset{{offset: 1, goPreambleSize: 4}, {offset: 5, goPreambleSize: 4}, {offset: 10, goPreambleSize: 4}},
+			executables:     &executables{executable: make([]byte, 1000)},
+			functionOffsets: []int{1, 5, 10},
 		},
 		module: &wasm.ModuleInstance{
 			TypeIDs: []wasm.FunctionTypeID{0, 0, 0, 0, 111, 222, 333},
@@ -136,8 +156,8 @@ func TestModuleEngine_ResolveImportedFunction(t *testing.T) {
 	im2 := &moduleEngine{
 		opaquePtr: &op2,
 		parent: &compiledModule{
-			executable:      make([]byte, 1000),
-			functionOffsets: []compiledFunctionOffset{{offset: 50, goPreambleSize: 4}},
+			executables:     &executables{executable: make([]byte, 1000)},
+			functionOffsets: []int{50, 4},
 		},
 		module: &wasm.ModuleInstance{
 			TypeIDs: []wasm.FunctionTypeID{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 999},
@@ -156,10 +176,71 @@ func TestModuleEngine_ResolveImportedFunction(t *testing.T) {
 		executable *byte
 		expTypeID  wasm.FunctionTypeID
 	}{
-		{index: 0, op: &op1, executable: &im1.parent.executable[1+4], expTypeID: 111},
-		{index: 1, op: &op2, executable: &im2.parent.executable[50+4], expTypeID: 999},
-		{index: 2, op: &op1, executable: &im1.parent.executable[10+4], expTypeID: 333},
-		{index: 3, op: &op1, executable: &im1.parent.executable[5+4], expTypeID: 222},
+		{index: 0, op: &op1, executable: &im1.parent.executable[1], expTypeID: 111},
+		{index: 1, op: &op2, executable: &im2.parent.executable[50], expTypeID: 999},
+		{index: 2, op: &op1, executable: &im1.parent.executable[10], expTypeID: 333},
+		{index: 3, op: &op1, executable: &im1.parent.executable[5], expTypeID: 222},
+	} {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			buf := m.opaque[begin+wazevoapi.FunctionInstanceSize*tc.index:]
+			actualExecutable := binary.LittleEndian.Uint64(buf)
+			actualOpaquePtr := binary.LittleEndian.Uint64(buf[8:])
+			actualTypeID := binary.LittleEndian.Uint64(buf[16:])
+			expExecutable := uint64(uintptr(unsafe.Pointer(tc.executable)))
+			expOpaquePtr := uint64(uintptr(unsafe.Pointer(tc.op)))
+			require.Equal(t, expExecutable, actualExecutable)
+			require.Equal(t, expOpaquePtr, actualOpaquePtr)
+			require.Equal(t, uint64(tc.expTypeID), actualTypeID)
+		})
+	}
+}
+
+func TestModuleEngine_ResolveImportedFunction_recursive(t *testing.T) {
+	const begin = 5000
+	m := &moduleEngine{
+		opaque:            make([]byte, 10000),
+		importedFunctions: make([]importedFunction, 4),
+		parent: &compiledModule{offsets: wazevoapi.ModuleContextOffsetData{
+			ImportedFunctionsBegin: begin,
+		}},
+	}
+
+	var importingOp, importedOp byte = 0xaa, 0xbb
+	imported := &moduleEngine{
+		opaquePtr: &importedOp,
+		parent: &compiledModule{
+			executables:     &executables{executable: make([]byte, 50)},
+			functionOffsets: []int{10},
+		},
+		module: &wasm.ModuleInstance{
+			TypeIDs: []wasm.FunctionTypeID{111},
+			Source:  &wasm.Module{FunctionSection: []wasm.Index{0}},
+		},
+	}
+	importing := &moduleEngine{
+		opaquePtr: &importingOp,
+		parent: &compiledModule{
+			executables:     &executables{executable: make([]byte, 1000)},
+			functionOffsets: []int{500},
+		},
+		importedFunctions: []importedFunction{{me: imported, indexInModule: 0}},
+		module: &wasm.ModuleInstance{
+			TypeIDs: []wasm.FunctionTypeID{0, 222, 0},
+			Source:  &wasm.Module{FunctionSection: []wasm.Index{1}},
+		},
+	}
+
+	m.ResolveImportedFunction(0, 0, importing)
+	m.ResolveImportedFunction(1, 1, importing)
+
+	for i, tc := range []struct {
+		index      int
+		op         *byte
+		executable *byte
+		expTypeID  wasm.FunctionTypeID
+	}{
+		{index: 0, op: &importedOp, executable: &imported.parent.executable[10], expTypeID: 111},
+		{index: 1, op: &importingOp, executable: &importing.parent.executable[500], expTypeID: 222},
 	} {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			buf := m.opaque[begin+wazevoapi.FunctionInstanceSize*tc.index:]

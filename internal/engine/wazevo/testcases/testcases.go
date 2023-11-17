@@ -327,7 +327,6 @@ var (
 		Module: SingleFunctionModule(i32_v, []byte{
 			wasm.OpcodeLoop, blockSignature_vv,
 			wasm.OpcodeBlock, blockSignature_vv,
-
 			wasm.OpcodeLocalGet, 0,
 			wasm.OpcodeBrIf, 2,
 			wasm.OpcodeEnd,
@@ -895,6 +894,39 @@ var (
 			wasm.OpcodeEnd,
 		}, []wasm.ValueType{}),
 	}
+	NonTrappingFloatConversions = TestCase{
+		Name: "float_conversions",
+		Module: SingleFunctionModule(wasm.FunctionType{
+			Params:  []wasm.ValueType{f64, f32},
+			Results: []wasm.ValueType{i64, i64, i32, i32, i64, i64, i32, i32},
+		}, []byte{
+			wasm.OpcodeLocalGet, 0,
+			wasm.OpcodeMiscPrefix, wasm.OpcodeMiscI64TruncSatF64S,
+
+			wasm.OpcodeLocalGet, 1,
+			wasm.OpcodeMiscPrefix, wasm.OpcodeMiscI64TruncSatF32S,
+
+			wasm.OpcodeLocalGet, 0,
+			wasm.OpcodeMiscPrefix, wasm.OpcodeMiscI32TruncSatF64S,
+
+			wasm.OpcodeLocalGet, 1,
+			wasm.OpcodeMiscPrefix, wasm.OpcodeMiscI32TruncSatF32S,
+
+			wasm.OpcodeLocalGet, 0,
+			wasm.OpcodeMiscPrefix, wasm.OpcodeMiscI64TruncSatF64U,
+
+			wasm.OpcodeLocalGet, 1,
+			wasm.OpcodeMiscPrefix, wasm.OpcodeMiscI64TruncSatF32U,
+
+			wasm.OpcodeLocalGet, 0,
+			wasm.OpcodeMiscPrefix, wasm.OpcodeMiscI32TruncSatF64U,
+
+			wasm.OpcodeLocalGet, 1,
+			wasm.OpcodeMiscPrefix, wasm.OpcodeMiscI32TruncSatF32U,
+
+			wasm.OpcodeEnd,
+		}, []wasm.ValueType{}),
+	}
 	FibonacciRecursive = TestCase{
 		Name: "recursive_fibonacci",
 		Module: SingleFunctionModule(i32_i32, []byte{
@@ -1428,7 +1460,100 @@ var (
 			},
 		},
 	}
+
+	IfThenEndNestingUnreachableIfThenElseEnd = TestCase{
+		// This has been detected by fuzzing. This should belong to internal/integration_test/fuzzcases eventually,
+		// but for now, wazevo should have its own cases under engine/wazevo.
+		Name: "if_then_end_nesting_unreachable_if_then_else_end",
+		// (module
+		//  (type (;0;) (func (param f64 f64 f64)))
+		//  (func (;0;) (type 0) (param f64 f64 f64)
+		//    block (result i64) ;; label = @1
+		//      memory.size
+		//      if ;; label = @2
+		//        memory.size
+		//        br 0 (;@2;)
+		//        if ;; label = @3
+		//        else
+		//        end
+		//        drop
+		//      end
+		//      i64.const 0
+		//    end
+		//    drop
+		//  )
+		//  (memory (;0;) 4554)
+		//)
+		Module: &wasm.Module{
+			TypeSection: []wasm.FunctionType{
+				{Params: []wasm.ValueType{f64, f64, f64}},
+				{Results: []wasm.ValueType{i64}},
+			},
+
+			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
+			MemorySection:   &wasm.Memory{Min: 4554},
+			FunctionSection: []wasm.Index{0},
+			CodeSection: []wasm.Code{{Body: []byte{
+				wasm.OpcodeBlock, 1, // Signature v_i64,
+				wasm.OpcodeMemorySize, 0,
+				wasm.OpcodeIf, blockSignature_vv,
+				wasm.OpcodeMemorySize, 0,
+				wasm.OpcodeBr, 0x0, // label=0
+				wasm.OpcodeIf, blockSignature_vv,
+				wasm.OpcodeElse,
+				wasm.OpcodeEnd,
+				wasm.OpcodeDrop,
+				wasm.OpcodeEnd,
+				wasm.OpcodeI64Const, 0,
+				wasm.OpcodeEnd,
+				wasm.OpcodeDrop,
+				wasm.OpcodeEnd,
+			}}},
+		},
+	}
+
+	VecBitSelect = TestCase{
+		Name: "vector_bit_select",
+		Module: &wasm.Module{
+			TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{v128, v128, v128}, Results: []wasm.ValueType{v128, v128}}},
+			ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
+			FunctionSection: []wasm.Index{0},
+			CodeSection: []wasm.Code{{Body: []byte{
+				// In arm64, the "C" of BSL instruction is overwritten by the result,
+				// so this case can be used to ensure that it is still alive if 'c' is used somewhere else,
+				// which in this case is as a return value.
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeLocalGet, 1,
+				wasm.OpcodeLocalGet, 2,
+				wasm.OpcodeVecPrefix, wasm.OpcodeVecV128Bitselect,
+				wasm.OpcodeLocalGet, 2, // Returns the 'c' as-is.
+				wasm.OpcodeEnd,
+			}}},
+		},
+	}
+
+	VecShuffle = TestCase{
+		Name:   "shuffle",
+		Module: VecShuffleWithLane(0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31),
+	}
 )
+
+// VecShuffleWithLane returns a VecShuffle test with a custom 16-bytes immediate (lane indexes).
+func VecShuffleWithLane(lane ...byte) *wasm.Module {
+	return &wasm.Module{
+		TypeSection:     []wasm.FunctionType{{Params: []wasm.ValueType{v128, v128}, Results: []wasm.ValueType{v128}}},
+		ExportSection:   []wasm.Export{{Name: ExportedFunctionName, Type: wasm.ExternTypeFunc, Index: 0}},
+		FunctionSection: []wasm.Index{0},
+		CodeSection: []wasm.Code{{
+			Body: append(append([]byte{
+				wasm.OpcodeLocalGet, 0,
+				wasm.OpcodeLocalGet, 1,
+				wasm.OpcodeVecPrefix, wasm.OpcodeVecV128i8x16Shuffle,
+			}, lane...),
+				wasm.OpcodeEnd),
+		}},
+	}
+}
 
 type TestCase struct {
 	Name             string
@@ -1462,10 +1587,11 @@ var (
 )
 
 const (
-	i32 = wasm.ValueTypeI32
-	i64 = wasm.ValueTypeI64
-	f32 = wasm.ValueTypeF32
-	f64 = wasm.ValueTypeF64
+	i32  = wasm.ValueTypeI32
+	i64  = wasm.ValueTypeI64
+	f32  = wasm.ValueTypeF32
+	f64  = wasm.ValueTypeF64
+	v128 = wasm.ValueTypeV128
 
 	blockSignature_vv = 0x40 // 0x40 is the v_v signature in 33-bit signed. See wasm.DecodeBlockType.
 )

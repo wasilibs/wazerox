@@ -16,6 +16,8 @@ type Opcode uint32
 // for all instructions, and therefore each field has different meaning
 // depending on Opcode.
 type Instruction struct {
+	// id is the unique ID of this instruction which ascends from 0 following the order of program.
+	id         int
 	opcode     Opcode
 	u1, u2     uint64
 	v          Value
@@ -27,10 +29,31 @@ type Instruction struct {
 	targets    []BasicBlock
 	prev, next *Instruction
 
-	rValue  Value
-	rValues []Value
-	gid     InstructionGroupID
-	live    bool
+	rValue         Value
+	rValues        []Value
+	gid            InstructionGroupID
+	sourceOffset   SourceOffset
+	live           bool
+	alreadyLowered bool
+}
+
+// SourceOffset represents the offset of the source of an instruction.
+type SourceOffset int64
+
+const sourceOffsetUnknown = -1
+
+// Valid returns true if this source offset is valid.
+func (l SourceOffset) Valid() bool {
+	return l != sourceOffsetUnknown
+}
+
+func (i *Instruction) annotateSourceOffset(line SourceOffset) {
+	i.sourceOffset = line
+}
+
+// SourceOffset returns the source offset of this instruction.
+func (i *Instruction) SourceOffset() SourceOffset {
+	return i.sourceOffset
 }
 
 // Opcode returns the opcode of this instruction.
@@ -43,8 +66,18 @@ func (i *Instruction) GroupID() InstructionGroupID {
 	return i.gid
 }
 
-// reset resets this instruction to the initial state.
-func (i *Instruction) reset() {
+// MarkLowered marks this instruction as already lowered.
+func (i *Instruction) MarkLowered() {
+	i.alreadyLowered = true
+}
+
+// Lowered returns true if this instruction is already lowered.
+func (i *Instruction) Lowered() bool {
+	return i.alreadyLowered
+}
+
+// resetInstruction resets this instruction to the initial state.
+func resetInstruction(i *Instruction) {
 	*i = Instruction{}
 	i.v = ValueInvalid
 	i.v2 = ValueInvalid
@@ -52,6 +85,7 @@ func (i *Instruction) reset() {
 	i.rValue = ValueInvalid
 	i.typ = typeInvalid
 	i.vs = nil
+	i.sourceOffset = sourceOffsetUnknown
 }
 
 // InstructionGroupID is assigned to each instruction and represents a group of instructions
@@ -93,6 +127,25 @@ func (i *Instruction) Arg() Value {
 // Arg2 returns the first two arguments to this instruction.
 func (i *Instruction) Arg2() (Value, Value) {
 	return i.v, i.v2
+}
+
+// ArgWithLane returns the first argument to this instruction, and the lane type.
+func (i *Instruction) ArgWithLane() (Value, VecLane) {
+	return i.v, VecLane(i.u1)
+}
+
+// Arg2WithLane returns the first two arguments to this instruction, and the lane type.
+func (i *Instruction) Arg2WithLane() (Value, Value, VecLane) {
+	return i.v, i.v2, VecLane(i.u1)
+}
+
+// ShuffleData returns the first two arguments to this instruction and 2 uint64s `lo`, `hi`.
+//
+// Note: Each uint64 encodes a sequence of 8 bytes where each byte encodes a VecLane,
+// so that the 128bit integer `hi<<64|lo` packs a slice `[16]VecLane`,
+// where `lane[0]` is the least significant byte, and `lane[n]` is shifted to offset `n*8`.
+func (i *Instruction) ShuffleData() (v Value, v2 Value, lo uint64, hi uint64) {
+	return i.v, i.v2, i.u1, i.u2
 }
 
 // Arg3 returns the first three arguments to this instruction.
@@ -159,12 +212,10 @@ const (
 	// Note that this is different from call_indirect in Wasm, which also does type checking, etc.
 	OpcodeCallIndirect
 
-	// OpcodeSplat ...
-	// `v = splat x`.
+	// OpcodeSplat performs a vector splat operation: `v = Splat.lane x`.
 	OpcodeSplat
 
-	// OpcodeSwizzle ...
-	// `v = swizzle x, y`.
+	// OpcodeSwizzle performs a vector swizzle operation: `v = Swizzle.lane x, y`.
 	OpcodeSwizzle
 
 	// OpcodeInsertlane ...
@@ -174,42 +225,6 @@ const (
 	// OpcodeExtractlane ...
 	// `v = extractlane x, Idx`. (BinaryImm8)
 	OpcodeExtractlane
-
-	// OpcodeSmin ...
-	// `v = smin x, y`.
-	OpcodeSmin
-
-	// OpcodeUmin ...
-	// `v = umin x, y`.
-	OpcodeUmin
-
-	// OpcodeSmax ...
-	// `v = smax x, y`.
-	OpcodeSmax
-
-	// OpcodeUmax ...
-	// `v = umax x, y`.
-	OpcodeUmax
-
-	// OpcodeAvgRound ...
-	// `v = avg_round x, y`.
-	OpcodeAvgRound
-
-	// OpcodeUaddSat ...
-	// `v = uadd_sat x, y`.
-	OpcodeUaddSat
-
-	// OpcodeSaddSat ...
-	// `v = sadd_sat x, y`.
-	OpcodeSaddSat
-
-	// OpcodeUsubSat ...
-	// `v = usub_sat x, y`.
-	OpcodeUsubSat
-
-	// OpcodeSsubSat ...
-	// `v = ssub_sat x, y`.
-	OpcodeSsubSat
 
 	// OpcodeLoad loads a Type value from the [base + offset] address: `v = Load base, offset`.
 	OpcodeLoad
@@ -244,82 +259,66 @@ const (
 	// OpcodeIstore32 stores the 32-bit value to the [base + offset] address, zero-extended to 64 bits: `Istore16 v, base, offset`.
 	OpcodeIstore32
 
-	// OpcodeUload8x8 ...
-	// `v = uload8x8 MemFlags, p, Offset`.
-	OpcodeUload8x8
+	// OpcodeLoadSplat represents a load that replicates the loaded value to all lanes `v = LoadSplat.lane p, Offset`.
+	OpcodeLoadSplat
 
-	// OpcodeSload8x8 ...
-	// `v = sload8x8 MemFlags, p, Offset`.
-	OpcodeSload8x8
-
-	// OpcodeUload16x4 ...
-	// `v = uload16x4 MemFlags, p, Offset`.
-	OpcodeUload16x4
-
-	// OpcodeSload16x4 ...
-	// `v = sload16x4 MemFlags, p, Offset`.
-	OpcodeSload16x4
-
-	// OpcodeUload32x2 ...
-	// `v = uload32x2 MemFlags, p, Offset`.
-	OpcodeUload32x2
-
-	// OpcodeSload32x2 ...
-	// `v = sload32x2 MemFlags, p, Offset`.
-	OpcodeSload32x2
+	// OpcodeVZeroExtLoad loads a scalar single/double precision floating point value from the [p + Offset] address,
+	// and zero-extend it to the V128 value: `v = VExtLoad  p, Offset`.
+	OpcodeVZeroExtLoad
 
 	// OpcodeIconst represents the integer const.
 	OpcodeIconst
 
-	// OpcodeF32const ...
-	// `v = f32const N`. (UnaryIeee32)
+	// OpcodeF32const represents the single-precision const.
 	OpcodeF32const
 
-	// OpcodeF64const ...
-	// `v = f64const N`. (UnaryIeee64)
+	// OpcodeF64const represents the double-precision const.
 	OpcodeF64const
 
-	// OpcodeVconst ...
-	// `v = vconst N`.
+	// OpcodeVconst represents the 128bit vector const.
 	OpcodeVconst
 
-	// OpcodeShuffle ...
-	// `v = shuffle a, b, mask`.
+	// OpcodeVbor computes binary or between two 128bit vectors: `v = bor x, y`.
+	OpcodeVbor
+
+	// OpcodeVbxor computes binary xor between two 128bit vectors: `v = bxor x, y`.
+	OpcodeVbxor
+
+	// OpcodeVband computes binary and between two 128bit vectors: `v = band x, y`.
+	OpcodeVband
+
+	// OpcodeVbandnot computes binary and-not between two 128bit vectors: `v = bandnot x, y`.
+	OpcodeVbandnot
+
+	// OpcodeVbnot negates a 128bit vector: `v = bnot x`.
+	OpcodeVbnot
+
+	// OpcodeVbitselect uses the bits in the control mask c to select the corresponding bit from x when 1
+	// and y when 0: `v = bitselect c, x, y`.
+	OpcodeVbitselect
+
+	// OpcodeShuffle shuffles two vectors using the given 128-bit immediate: `v = shuffle imm, x, y`.
+	// For each byte in the immediate, a value i in [0, 15] selects the i-th byte in vector x;
+	// i in [16, 31] selects the (i-16)-th byte in vector y.
 	OpcodeShuffle
 
 	// OpcodeSelect chooses between two values based on a condition `c`: `v = Select c, x, y`.
 	OpcodeSelect
 
-	// OpcodeBitselect ...
-	// `v = bitselect c, x, y`.
-	OpcodeBitselect
-
-	// OpcodeVsplit ...
-	// `lo, hi = vsplit x`.
-	OpcodeVsplit
-
-	// OpcodeVconcat ...
-	// `v = vconcat x, y`.
-	OpcodeVconcat
-
-	// OpcodeVselect ...
-	// `v = vselect c, x, y`.
-	OpcodeVselect
-
-	// OpcodeVanyTrue ...
-	// `s = vany_true a`.
+	// OpcodeVanyTrue performs a any true operation: `s = VanyTrue a`.
 	OpcodeVanyTrue
 
-	// OpcodeVallTrue ...
-	// `s = vall_true a`.
+	// OpcodeVallTrue performs a lane-wise all true operation: `s = VallTrue.lane a`.
 	OpcodeVallTrue
 
-	// OpcodeVhighBits ...
-	// `x = vhigh_bits a`.
+	// OpcodeVhighBits performs a lane-wise extract of the high bits: `v = VhighBits.lane a`.
 	OpcodeVhighBits
 
 	// OpcodeIcmp compares two integer values with the given condition: `v = icmp Cond, x, y`.
 	OpcodeIcmp
+
+	// OpcodeVIcmp compares two integer values with the given condition: `v = vicmp Cond, x, y` on vector.
+	OpcodeVIcmp
 
 	// OpcodeIcmpImm compares an integer value with the immediate value on the given condition: `v = icmp_imm Cond, x, Y`.
 	OpcodeIcmpImm
@@ -327,23 +326,125 @@ const (
 	// OpcodeIadd performs an integer addition: `v = Iadd x, y`.
 	OpcodeIadd
 
+	// OpcodeVIadd performs an integer addition: `v = VIadd.lane x, y` on vector.
+	OpcodeVIadd
+
+	// OpcodeVSaddSat performs a signed saturating vector addition: `v = VSaddSat.lane x, y` on vector.
+	OpcodeVSaddSat
+
+	// OpcodeVUaddSat performs an unsigned saturating vector addition: `v = VUaddSat.lane x, y` on vector.
+	OpcodeVUaddSat
+
 	// OpcodeIsub performs an integer subtraction: `v = Isub x, y`.
 	OpcodeIsub
 
+	// OpcodeVIsub performs an integer subtraction: `v = VIsub.lane x, y` on vector.
+	OpcodeVIsub
+
+	// OpcodeVSsubSat performs a signed saturating vector subtraction: `v = VSsubSat.lane x, y` on vector.
+	OpcodeVSsubSat
+
+	// OpcodeVUsubSat performs an unsigned saturating vector subtraction: `v = VUsubSat.lane x, y` on vector.
+	OpcodeVUsubSat
+
+	// OpcodeVImin performs a signed integer min: `v = VImin.lane x, y` on vector.
+	OpcodeVImin
+
+	// OpcodeVUmin performs an unsigned integer min: `v = VUmin.lane x, y` on vector.
+	OpcodeVUmin
+
+	// OpcodeVImax performs a signed integer max: `v = VImax.lane x, y` on vector.
+	OpcodeVImax
+
+	// OpcodeVUmax performs an unsigned integer max: `v = VUmax.lane x, y` on vector.
+	OpcodeVUmax
+
+	// OpcodeVAvgRound performs an unsigned integer avg, truncating to zero: `v = VAvgRound.lane x, y` on vector.
+	OpcodeVAvgRound
+
+	// OpcodeVImul performs an integer multiplication: `v = VImul.lane x, y` on vector.
+	OpcodeVImul
+
+	// OpcodeVIneg negates the given integer vector value: `v = VIneg x`.
+	OpcodeVIneg
+
+	// OpcodeVIpopcnt counts the number of 1-bits in the given vector: `v = VIpopcnt x`.
+	OpcodeVIpopcnt
+
+	// OpcodeVIabs returns the absolute value for the given vector value: `v = VIabs.lane x`.
+	OpcodeVIabs
+
+	// OpcodeVIshl shifts x left by (y mod lane-width): `v = VIshl.lane x, y` on vector.
+	OpcodeVIshl
+
+	// OpcodeVUshr shifts x right by (y mod lane-width), unsigned: `v = VUshr.lane x, y` on vector.
+	OpcodeVUshr
+
+	// OpcodeVSshr shifts x right by (y mod lane-width), signed: `v = VSshr.lane x, y` on vector.
+	OpcodeVSshr
+
+	// OpcodeVFabs takes the absolute value of a floating point value: `v = VFabs.lane x on vector.
+	OpcodeVFabs
+
+	// OpcodeVFmax takes the maximum of two floating point values: `v = VFmax.lane x, y on vector.
+	OpcodeVFmax
+
+	// OpcodeVFmin takes the minimum of two floating point values: `v = VFmin.lane x, y on vector.
+	OpcodeVFmin
+
+	// OpcodeVFneg negates the given floating point vector value: `v = VFneg x`.
+	OpcodeVFneg
+
+	// OpcodeVFadd performs a floating point addition: `v = VFadd.lane x, y` on vector.
+	OpcodeVFadd
+
+	// OpcodeVFsub performs a floating point subtraction: `v = VFsub.lane x, y` on vector.
+	OpcodeVFsub
+
+	// OpcodeVFmul performs a floating point multiplication: `v = VFmul.lane x, y` on vector.
+	OpcodeVFmul
+
+	// OpcodeVFdiv performs a floating point division: `v = VFdiv.lane x, y` on vector.
+	OpcodeVFdiv
+
+	// OpcodeVFcmp compares two float values with the given condition: `v = VFcmp.lane Cond, x, y` on float.
+	OpcodeVFcmp
+
+	// OpcodeVCeil takes the ceiling of the given floating point value: `v = ceil.lane x` on vector.
+	OpcodeVCeil
+
+	// OpcodeVFloor takes the floor of the given floating point value: `v = floor.lane x` on vector.
+	OpcodeVFloor
+
+	// OpcodeVTrunc takes the truncation of the given floating point value: `v = trunc.lane x` on vector.
+	OpcodeVTrunc
+
+	// OpcodeVNearest takes the nearest integer of the given floating point value: `v = nearest.lane x` on vector.
+	OpcodeVNearest
+
+	// OpcodeVMaxPseudo computes the lane-wise maximum value `v = VMaxPseudo.lane x, y` on vector defined as `x < y ? x : y`.
+	OpcodeVMaxPseudo
+
+	// OpcodeVMinPseudo computes the lane-wise minimum value `v = VMinPseudo.lane x, y` on vector defined as `y < x ? x : y`.
+	OpcodeVMinPseudo
+
+	// OpcodeVSqrt takes the minimum of two floating point values: `v = VFmin.lane x, y` on vector.
+	OpcodeVSqrt
+
+	// OpcodeVFcvtToUintSat converts a floating point value to an unsigned integer: `v = FcvtToUintSat.lane x` on vector.
+	OpcodeVFcvtToUintSat
+
+	// OpcodeVFcvtToSintSat converts a floating point value to a signed integer: `v = VFcvtToSintSat.lane x` on vector.
+	OpcodeVFcvtToSintSat
+
+	// OpcodeVFcvtFromUint converts a floating point value from an unsigned integer: `v = FcvtFromUint.lane x` on vector.
+	OpcodeVFcvtFromUint
+
+	// OpcodeVFcvtFromSint converts a floating point value from a signed integer: `v = VFcvtFromSint.lane x` on vector.
+	OpcodeVFcvtFromSint
+
 	// OpcodeImul performs an integer multiplication: `v = Imul x, y`.
 	OpcodeImul
-
-	// OpcodeUmulhi ...
-	// `v = umulhi x, y`.
-	OpcodeUmulhi
-
-	// OpcodeSmulhi ...
-	// `v = smulhi x, y`.
-	OpcodeSmulhi
-
-	// OpcodeSqmulRoundSat ...
-	// `v = sqmul_round_sat x, y`.
-	OpcodeSqmulRoundSat
 
 	// OpcodeUdiv performs the unsigned integer division `v = Udiv x, y`.
 	OpcodeUdiv
@@ -357,125 +458,17 @@ const (
 	// OpcodeSrem computes the remainder of the signed integer division `v = Srem x, y`.
 	OpcodeSrem
 
-	// OpcodeIaddImm ...
-	// `v = iadd_imm x, Y`. (BinaryImm64)
-	OpcodeIaddImm
-
-	// OpcodeImulImm ...
-	// `v = imul_imm x, Y`. (BinaryImm64)
-	OpcodeImulImm
-
-	// OpcodeUdivImm ...
-	// `v = udiv_imm x, Y`. (BinaryImm64)
-	OpcodeUdivImm
-
-	// OpcodeSdivImm ...
-	// `v = sdiv_imm x, Y`. (BinaryImm64)
-	OpcodeSdivImm
-
-	// OpcodeUremImm ...
-	// `v = urem_imm x, Y`. (BinaryImm64)
-	OpcodeUremImm
-
-	// OpcodeSremImm ...
-	// `v = srem_imm x, Y`. (BinaryImm64)
-	OpcodeSremImm
-
-	// OpcodeIrsubImm ...
-	// `v = irsub_imm x, Y`. (BinaryImm64)
-	OpcodeIrsubImm
-
-	// OpcodeIaddCin ...
-	// `v = iadd_cin x, y, c_in`.
-	OpcodeIaddCin
-
-	// OpcodeIaddIfcin ...
-	// `v = iadd_ifcin x, y, c_in`.
-	OpcodeIaddIfcin
-
-	// OpcodeIaddCout ...
-	// `a, c_out = iadd_cout x, y`.
-	OpcodeIaddCout
-
-	// OpcodeIaddIfcout ...
-	// `a, c_out = iadd_ifcout x, y`.
-	OpcodeIaddIfcout
-
-	// OpcodeIaddCarry ...
-	// `a, c_out = iadd_carry x, y, c_in`.
-	OpcodeIaddCarry
-
-	// OpcodeIaddIfcarry ...
-	// `a, c_out = iadd_ifcarry x, y, c_in`.
-	OpcodeIaddIfcarry
-
-	// OpcodeUaddOverflowTrap ...
-	// `v = uadd_overflow_trap x, y, code`.
-	OpcodeUaddOverflowTrap
-
-	// OpcodeIsubBin ...
-	// `v = isub_bin x, y, b_in`.
-	OpcodeIsubBin
-
-	// OpcodeIsubIfbin ...
-	// `v = isub_ifbin x, y, b_in`.
-	OpcodeIsubIfbin
-
-	// OpcodeIsubBout ...
-	// `a, b_out = isub_bout x, y`.
-	OpcodeIsubBout
-
-	// OpcodeIsubIfbout ...
-	// `a, b_out = isub_ifbout x, y`.
-	OpcodeIsubIfbout
-
-	// OpcodeIsubBorrow ...
-	// `a, b_out = isub_borrow x, y, b_in`.
-	OpcodeIsubBorrow
-
-	// OpcodeIsubIfborrow ...
-	// `a, b_out = isub_ifborrow x, y, b_in`.
-	OpcodeIsubIfborrow
-
-	// OpcodeBand ...
-	// `v = band x, y`.
+	// OpcodeBand performs a binary and: `v = Band x, y`.
 	OpcodeBand
 
-	// OpcodeBor ...
-	// `v = bor x, y`.
+	// OpcodeBor performs a binary or: `v = Bor x, y`.
 	OpcodeBor
 
-	// OpcodeBxor ...
-	// `v = bxor x, y`.
+	// OpcodeBxor performs a binary xor: `v = Bxor x, y`.
 	OpcodeBxor
 
-	// OpcodeBnot ...
-	// `v = bnot x`.
+	// OpcodeBnot performs a binary not: `v = Bnot x`.
 	OpcodeBnot
-
-	// OpcodeBandNot ...
-	// `v = band_not x, y`.
-	OpcodeBandNot
-
-	// OpcodeBorNot ...
-	// `v = bor_not x, y`.
-	OpcodeBorNot
-
-	// OpcodeBxorNot ...
-	// `v = bxor_not x, y`.
-	OpcodeBxorNot
-
-	// OpcodeBandImm ...
-	// `v = band_imm x, Y`. (BinaryImm64)
-	OpcodeBandImm
-
-	// OpcodeBorImm ...
-	// `v = bor_imm x, Y`. (BinaryImm64)
-	OpcodeBorImm
-
-	// OpcodeBxorImm ...
-	// `v = bxor_imm x, Y`. (BinaryImm64)
-	OpcodeBxorImm
 
 	// OpcodeRotl rotates the given integer value to the left: `v = Rotl x, y`.
 	OpcodeRotl
@@ -483,41 +476,14 @@ const (
 	// OpcodeRotr rotates the given integer value to the right: `v = Rotr x, y`.
 	OpcodeRotr
 
-	// OpcodeRotlImm ...
-	// `v = rotl_imm x, Y`. (BinaryImm64)
-	OpcodeRotlImm
-
-	// OpcodeRotrImm ...
-	// `v = rotr_imm x, Y`. (BinaryImm64)
-	OpcodeRotrImm
-
-	// OpcodeIshl ...
-	// `v = ishl x, y`.
+	// OpcodeIshl does logical shift left: `v = Ishl x, y`.
 	OpcodeIshl
 
-	// OpcodeUshr ...
-	// `v = ushr x, y`.
+	// OpcodeUshr does logical shift right: `v = Ushr x, y`.
 	OpcodeUshr
 
-	// OpcodeSshr ...
-	// `v = sshr x, y`.
+	// OpcodeSshr does arithmetic shift right: `v = Sshr x, y`.
 	OpcodeSshr
-
-	// OpcodeIshlImm ...
-	// `v = ishl_imm x, Y`. (BinaryImm64)
-	OpcodeIshlImm
-
-	// OpcodeUshrImm ...
-	// `v = ushr_imm x, Y`. (BinaryImm64)
-	OpcodeUshrImm
-
-	// OpcodeSshrImm ...
-	// `v = sshr_imm x, Y`. (BinaryImm64)
-	OpcodeSshrImm
-
-	// OpcodeBitrev ...
-	// `v = bitrev x`.
-	OpcodeBitrev
 
 	// OpcodeClz counts the number of leading zeros: `v = clz x`.
 	OpcodeClz
@@ -540,6 +506,10 @@ const (
 	// OpcodeFmul performs a floating point multiplication: `v = Fmul x, y`.
 	OpcodeFmul
 
+	// OpcodeSqmulRoundSat performs a lane-wise saturating rounding multiplication
+	// in Q15 format: `v = SqmulRoundSat.lane x,y` on vector.
+	OpcodeSqmulRoundSat
+
 	// OpcodeFdiv performs a floating point division: `v = Fdiv x, y`.
 	OpcodeFdiv
 
@@ -552,8 +522,8 @@ const (
 	// OpcodeFabs takes the absolute value of the given floating point value: `v = fabs x`.
 	OpcodeFabs
 
-	// OpcodeFcopysign ...
-	// `v = fcopysign x, y`.
+	// OpcodeFcopysign copies the sign of the second floating point value to the first floating point value:
+	// `v = Fcopysign x, y`.
 	OpcodeFcopysign
 
 	// OpcodeFmin takes the minimum of two floating point values: `v = fmin x, y`.
@@ -574,12 +544,8 @@ const (
 	// OpcodeNearest takes the nearest integer of the given floating point value: `v = nearest x`.
 	OpcodeNearest
 
-	// OpcodeBitcast is a bitcast operation: `v = bitcast MemFlags, x`.
+	// OpcodeBitcast is a bitcast operation: `v = bitcast x`.
 	OpcodeBitcast
-
-	// OpcodeScalarToVector ...
-	// `v = scalar_to_vector s`.
-	OpcodeScalarToVector
 
 	// OpcodeBmask ...
 	// `v = bmask x`.
@@ -588,37 +554,26 @@ const (
 	// OpcodeIreduce ...
 	// `v = ireduce x`.
 	OpcodeIreduce
-	// `v = snarrow x, y`.
 
-	// OpcodeSnarrow ...
+	// OpcodeSnarrow converts two input vectors x, y into a smaller lane vector by narrowing each lane, signed `v = Snarrow.lane x, y`.
 	OpcodeSnarrow
-	// `v = unarrow x, y`.
 
-	// OpcodeUnarrow ...
+	// OpcodeUnarrow converts two input vectors x, y into a smaller lane vector by narrowing each lane, unsigned `v = Unarrow.lane x, y`.
 	OpcodeUnarrow
-	// `v = uunarrow x, y`.
 
-	// OpcodeUunarrow ...
-	OpcodeUunarrow
-	// `v = swiden_low x`.
-
-	// OpcodeSwidenLow ...
+	// OpcodeSwidenLow converts low half of the smaller lane vector to a larger lane vector, sign extended: `v = SwidenLow.lane x`.
 	OpcodeSwidenLow
-	// `v = swiden_high x`.
 
-	// OpcodeSwidenHigh ...
+	// OpcodeSwidenHigh converts high half of the smaller lane vector to a larger lane vector, sign extended: `v = SwidenHigh.lane x`.
 	OpcodeSwidenHigh
-	// `v = uwiden_low x`.
 
-	// OpcodeUwidenLow ...
+	// OpcodeUwidenLow converts low half of the smaller lane vector to a larger lane vector, zero (unsigned) extended: `v = UwidenLow.lane x`.
 	OpcodeUwidenLow
-	// `v = uwiden_high x`.
 
-	// OpcodeUwidenHigh ...
+	// OpcodeUwidenHigh converts high half of the smaller lane vector to a larger lane vector, zero (unsigned) extended: `v = UwidenHigh.lane x`.
 	OpcodeUwidenHigh
-	// `v = iadd_pairwise x, y`.
 
-	// OpcodeIaddPairwise ...
+	// OpcodeIaddPairwise is a lane-wise integer extended pairwise addition producing extended results (twice wider results than the inputs): `v = iadd_pairwise x, y` on vector.
 	OpcodeIaddPairwise
 
 	// OpcodeWideningPairwiseDotProductS ...
@@ -634,11 +589,15 @@ const (
 	// OpcodeFpromote promotes the given floating point value: `v = Fpromote x`.
 	OpcodeFpromote
 
+	// OpcodeFvpromoteLow converts the two lower single-precision floating point lanes
+	// to the two double-precision lanes of the result: `v = FvpromoteLow.lane x` on vector.
+	OpcodeFvpromoteLow
+
 	// OpcodeFdemote demotes the given float point value: `v = Fdemote x`.
 	OpcodeFdemote
 
-	// OpcodeFvdemote ...
-	// `v = fvdemote x`.
+	// OpcodeFvdemote converts the two double-precision floating point lanes
+	// to two lower single-precision lanes of the result `v = Fvdemote.lane x`.
 	OpcodeFvdemote
 
 	// OpcodeFcvtToUint ...
@@ -689,10 +648,6 @@ const (
 	// `fence`.
 	OpcodeFence
 
-	// OpcodeExtractVector ...
-	// `v = extract_vector x, y`. (BinaryImm8)
-	OpcodeExtractVector
-
 	// opcodeEnd marks the end of the opcode list.
 	opcodeEnd
 )
@@ -707,6 +662,7 @@ var (
 	returnTypesFnI32                     = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeI32, nil }
 	returnTypesFnF32                     = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF32, nil }
 	returnTypesFnF64                     = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeF64, nil }
+	returnTypesFnV128                    = func(b *builder, instr *Instruction) (t1 Type, ts []Type) { return TypeV128, nil }
 )
 
 // sideEffect provides the info to determine if an instruction has side effects which
@@ -735,6 +691,8 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeImul:               sideEffectNone,
 	OpcodeIsub:               sideEffectNone,
 	OpcodeIcmp:               sideEffectNone,
+	OpcodeExtractlane:        sideEffectNone,
+	OpcodeInsertlane:         sideEffectNone,
 	OpcodeBand:               sideEffectNone,
 	OpcodeBor:                sideEffectNone,
 	OpcodeBxor:               sideEffectNone,
@@ -746,6 +704,7 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeCtz:                sideEffectNone,
 	OpcodePopcnt:             sideEffectNone,
 	OpcodeLoad:               sideEffectNone,
+	OpcodeLoadSplat:          sideEffectNone,
 	OpcodeUload8:             sideEffectNone,
 	OpcodeUload16:            sideEffectNone,
 	OpcodeUload32:            sideEffectNone,
@@ -754,6 +713,15 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeSload32:            sideEffectNone,
 	OpcodeSExtend:            sideEffectNone,
 	OpcodeUExtend:            sideEffectNone,
+	OpcodeSwidenLow:          sideEffectNone,
+	OpcodeUwidenLow:          sideEffectNone,
+	OpcodeSwidenHigh:         sideEffectNone,
+	OpcodeUwidenHigh:         sideEffectNone,
+	OpcodeSnarrow:            sideEffectNone,
+	OpcodeUnarrow:            sideEffectNone,
+	OpcodeSwizzle:            sideEffectNone,
+	OpcodeShuffle:            sideEffectNone,
+	OpcodeSplat:              sideEffectNone,
 	OpcodeFsub:               sideEffectNone,
 	OpcodeF32const:           sideEffectNone,
 	OpcodeF64const:           sideEffectNone,
@@ -773,6 +741,7 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeFdiv:               sideEffectNone,
 	OpcodeFmul:               sideEffectNone,
 	OpcodeFmax:               sideEffectNone,
+	OpcodeSqmulRoundSat:      sideEffectNone,
 	OpcodeSelect:             sideEffectNone,
 	OpcodeFmin:               sideEffectNone,
 	OpcodeFneg:               sideEffectNone,
@@ -780,7 +749,13 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeFcvtToUint:         sideEffectTraps,
 	OpcodeFcvtFromSint:       sideEffectNone,
 	OpcodeFcvtFromUint:       sideEffectNone,
+	OpcodeFcvtToSintSat:      sideEffectNone,
+	OpcodeFcvtToUintSat:      sideEffectNone,
+	OpcodeVFcvtFromUint:      sideEffectNone,
+	OpcodeVFcvtFromSint:      sideEffectNone,
 	OpcodeFdemote:            sideEffectNone,
+	OpcodeFvpromoteLow:       sideEffectNone,
+	OpcodeFvdemote:           sideEffectNone,
 	OpcodeFpromote:           sideEffectNone,
 	OpcodeBitcast:            sideEffectNone,
 	OpcodeIreduce:            sideEffectNone,
@@ -795,6 +770,55 @@ var instructionSideEffects = [opcodeEnd]sideEffect{
 	OpcodeUrem:               sideEffectTraps,
 	OpcodeFabs:               sideEffectNone,
 	OpcodeFcopysign:          sideEffectNone,
+	OpcodeIaddPairwise:       sideEffectNone,
+	OpcodeVconst:             sideEffectNone,
+	OpcodeVbor:               sideEffectNone,
+	OpcodeVbxor:              sideEffectNone,
+	OpcodeVband:              sideEffectNone,
+	OpcodeVbandnot:           sideEffectNone,
+	OpcodeVbnot:              sideEffectNone,
+	OpcodeVbitselect:         sideEffectNone,
+	OpcodeVanyTrue:           sideEffectNone,
+	OpcodeVallTrue:           sideEffectNone,
+	OpcodeVhighBits:          sideEffectNone,
+	OpcodeVIadd:              sideEffectNone,
+	OpcodeVSaddSat:           sideEffectNone,
+	OpcodeVUaddSat:           sideEffectNone,
+	OpcodeVIsub:              sideEffectNone,
+	OpcodeVSsubSat:           sideEffectNone,
+	OpcodeVUsubSat:           sideEffectNone,
+	OpcodeVIcmp:              sideEffectNone,
+	OpcodeVImin:              sideEffectNone,
+	OpcodeVUmin:              sideEffectNone,
+	OpcodeVImax:              sideEffectNone,
+	OpcodeVUmax:              sideEffectNone,
+	OpcodeVAvgRound:          sideEffectNone,
+	OpcodeVImul:              sideEffectNone,
+	OpcodeVIabs:              sideEffectNone,
+	OpcodeVIneg:              sideEffectNone,
+	OpcodeVIpopcnt:           sideEffectNone,
+	OpcodeVIshl:              sideEffectNone,
+	OpcodeVSshr:              sideEffectNone,
+	OpcodeVUshr:              sideEffectNone,
+	OpcodeVSqrt:              sideEffectNone,
+	OpcodeVFabs:              sideEffectNone,
+	OpcodeVFmin:              sideEffectNone,
+	OpcodeVFmax:              sideEffectNone,
+	OpcodeVFneg:              sideEffectNone,
+	OpcodeVFadd:              sideEffectNone,
+	OpcodeVFsub:              sideEffectNone,
+	OpcodeVFmul:              sideEffectNone,
+	OpcodeVFdiv:              sideEffectNone,
+	OpcodeVFcmp:              sideEffectNone,
+	OpcodeVCeil:              sideEffectNone,
+	OpcodeVFloor:             sideEffectNone,
+	OpcodeVTrunc:             sideEffectNone,
+	OpcodeVNearest:           sideEffectNone,
+	OpcodeVMaxPseudo:         sideEffectNone,
+	OpcodeVMinPseudo:         sideEffectNone,
+	OpcodeVFcvtToUintSat:     sideEffectNone,
+	OpcodeVFcvtToSintSat:     sideEffectNone,
+	OpcodeVZeroExtLoad:       sideEffectNone,
 }
 
 // sideEffect returns true if this instruction has side effects.
@@ -808,33 +832,73 @@ func (i *Instruction) sideEffect() sideEffect {
 
 // instructionReturnTypes provides the function to determine the return types of an instruction.
 var instructionReturnTypes = [opcodeEnd]returnTypesFn{
-	OpcodeBand:      returnTypesFnSingle,
-	OpcodeFcopysign: returnTypesFnSingle,
-	OpcodeBitcast:   returnTypesFnSingle,
-	OpcodeBor:       returnTypesFnSingle,
-	OpcodeBxor:      returnTypesFnSingle,
-	OpcodeRotl:      returnTypesFnSingle,
-	OpcodeRotr:      returnTypesFnSingle,
-	OpcodeIshl:      returnTypesFnSingle,
-	OpcodeSshr:      returnTypesFnSingle,
-	OpcodeSdiv:      returnTypesFnSingle,
-	OpcodeSrem:      returnTypesFnSingle,
-	OpcodeUdiv:      returnTypesFnSingle,
-	OpcodeUrem:      returnTypesFnSingle,
-	OpcodeUshr:      returnTypesFnSingle,
-	OpcodeJump:      returnTypesFnNoReturns,
-	OpcodeUndefined: returnTypesFnNoReturns,
-	OpcodeIconst:    returnTypesFnSingle,
-	OpcodeSelect:    returnTypesFnSingle,
-	OpcodeSExtend:   returnTypesFnSingle,
-	OpcodeUExtend:   returnTypesFnSingle,
-	OpcodeIreduce:   returnTypesFnSingle,
-	OpcodeFabs:      returnTypesFnSingle,
-	OpcodeSqrt:      returnTypesFnSingle,
-	OpcodeCeil:      returnTypesFnSingle,
-	OpcodeFloor:     returnTypesFnSingle,
-	OpcodeTrunc:     returnTypesFnSingle,
-	OpcodeNearest:   returnTypesFnSingle,
+	OpcodeIaddPairwise: returnTypesFnV128,
+	OpcodeVbor:         returnTypesFnV128,
+	OpcodeVbxor:        returnTypesFnV128,
+	OpcodeVband:        returnTypesFnV128,
+	OpcodeVbnot:        returnTypesFnV128,
+	OpcodeVbandnot:     returnTypesFnV128,
+	OpcodeVbitselect:   returnTypesFnV128,
+	OpcodeVanyTrue:     returnTypesFnI32,
+	OpcodeVallTrue:     returnTypesFnI32,
+	OpcodeVhighBits:    returnTypesFnI32,
+	OpcodeVIadd:        returnTypesFnV128,
+	OpcodeVSaddSat:     returnTypesFnV128,
+	OpcodeVUaddSat:     returnTypesFnV128,
+	OpcodeVIsub:        returnTypesFnV128,
+	OpcodeVSsubSat:     returnTypesFnV128,
+	OpcodeVUsubSat:     returnTypesFnV128,
+	OpcodeVIcmp:        returnTypesFnV128,
+	OpcodeVImin:        returnTypesFnV128,
+	OpcodeVUmin:        returnTypesFnV128,
+	OpcodeVImax:        returnTypesFnV128,
+	OpcodeVUmax:        returnTypesFnV128,
+	OpcodeVImul:        returnTypesFnV128,
+	OpcodeVAvgRound:    returnTypesFnV128,
+	OpcodeVIabs:        returnTypesFnV128,
+	OpcodeVIneg:        returnTypesFnV128,
+	OpcodeVIpopcnt:     returnTypesFnV128,
+	OpcodeVIshl:        returnTypesFnV128,
+	OpcodeVSshr:        returnTypesFnV128,
+	OpcodeVUshr:        returnTypesFnV128,
+	OpcodeExtractlane:  returnTypesFnSingle,
+	OpcodeInsertlane:   returnTypesFnV128,
+	OpcodeBand:         returnTypesFnSingle,
+	OpcodeFcopysign:    returnTypesFnSingle,
+	OpcodeBitcast:      returnTypesFnSingle,
+	OpcodeBor:          returnTypesFnSingle,
+	OpcodeBxor:         returnTypesFnSingle,
+	OpcodeRotl:         returnTypesFnSingle,
+	OpcodeRotr:         returnTypesFnSingle,
+	OpcodeIshl:         returnTypesFnSingle,
+	OpcodeSshr:         returnTypesFnSingle,
+	OpcodeSdiv:         returnTypesFnSingle,
+	OpcodeSrem:         returnTypesFnSingle,
+	OpcodeUdiv:         returnTypesFnSingle,
+	OpcodeUrem:         returnTypesFnSingle,
+	OpcodeUshr:         returnTypesFnSingle,
+	OpcodeJump:         returnTypesFnNoReturns,
+	OpcodeUndefined:    returnTypesFnNoReturns,
+	OpcodeIconst:       returnTypesFnSingle,
+	OpcodeSelect:       returnTypesFnSingle,
+	OpcodeSExtend:      returnTypesFnSingle,
+	OpcodeUExtend:      returnTypesFnSingle,
+	OpcodeSwidenLow:    returnTypesFnV128,
+	OpcodeUwidenLow:    returnTypesFnV128,
+	OpcodeSwidenHigh:   returnTypesFnV128,
+	OpcodeUwidenHigh:   returnTypesFnV128,
+	OpcodeSnarrow:      returnTypesFnV128,
+	OpcodeUnarrow:      returnTypesFnV128,
+	OpcodeSwizzle:      returnTypesFnSingle,
+	OpcodeShuffle:      returnTypesFnV128,
+	OpcodeSplat:        returnTypesFnV128,
+	OpcodeIreduce:      returnTypesFnSingle,
+	OpcodeFabs:         returnTypesFnSingle,
+	OpcodeSqrt:         returnTypesFnSingle,
+	OpcodeCeil:         returnTypesFnSingle,
+	OpcodeFloor:        returnTypesFnSingle,
+	OpcodeTrunc:        returnTypesFnSingle,
+	OpcodeNearest:      returnTypesFnSingle,
 	OpcodeCallIndirect: func(b *builder, instr *Instruction) (t1 Type, ts []Type) {
 		sigID := SignatureID(instr.u1)
 		sig, ok := b.signatures[sigID]
@@ -868,6 +932,8 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 		return
 	},
 	OpcodeLoad:               returnTypesFnSingle,
+	OpcodeVZeroExtLoad:       returnTypesFnV128,
+	OpcodeLoadSplat:          returnTypesFnV128,
 	OpcodeIadd:               returnTypesFnSingle,
 	OpcodeIsub:               returnTypesFnSingle,
 	OpcodeImul:               returnTypesFnSingle,
@@ -879,6 +945,7 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeFmul:               returnTypesFnSingle,
 	OpcodeFmax:               returnTypesFnSingle,
 	OpcodeFmin:               returnTypesFnSingle,
+	OpcodeSqmulRoundSat:      returnTypesFnV128,
 	OpcodeF32const:           returnTypesFnF32,
 	OpcodeF64const:           returnTypesFnF64,
 	OpcodeClz:                returnTypesFnSingle,
@@ -904,9 +971,34 @@ var instructionReturnTypes = [opcodeEnd]returnTypesFn{
 	OpcodeFcvtToUint:         returnTypesFnSingle,
 	OpcodeFcvtFromSint:       returnTypesFnSingle,
 	OpcodeFcvtFromUint:       returnTypesFnSingle,
+	OpcodeFcvtToSintSat:      returnTypesFnSingle,
+	OpcodeFcvtToUintSat:      returnTypesFnSingle,
+	OpcodeVFcvtFromUint:      returnTypesFnV128,
+	OpcodeVFcvtFromSint:      returnTypesFnV128,
 	OpcodeFneg:               returnTypesFnSingle,
 	OpcodeFdemote:            returnTypesFnF32,
+	OpcodeFvdemote:           returnTypesFnV128,
+	OpcodeFvpromoteLow:       returnTypesFnV128,
 	OpcodeFpromote:           returnTypesFnF64,
+	OpcodeVconst:             returnTypesFnV128,
+	OpcodeVFabs:              returnTypesFnV128,
+	OpcodeVSqrt:              returnTypesFnV128,
+	OpcodeVFmax:              returnTypesFnV128,
+	OpcodeVFmin:              returnTypesFnV128,
+	OpcodeVFneg:              returnTypesFnV128,
+	OpcodeVFadd:              returnTypesFnV128,
+	OpcodeVFsub:              returnTypesFnV128,
+	OpcodeVFmul:              returnTypesFnV128,
+	OpcodeVFdiv:              returnTypesFnV128,
+	OpcodeVFcmp:              returnTypesFnV128,
+	OpcodeVCeil:              returnTypesFnV128,
+	OpcodeVFloor:             returnTypesFnV128,
+	OpcodeVTrunc:             returnTypesFnV128,
+	OpcodeVNearest:           returnTypesFnV128,
+	OpcodeVMaxPseudo:         returnTypesFnV128,
+	OpcodeVMinPseudo:         returnTypesFnV128,
+	OpcodeVFcvtToUintSat:     returnTypesFnV128,
+	OpcodeVFcvtToSintSat:     returnTypesFnV128,
 }
 
 // AsLoad initializes this instruction as a store instruction with OpcodeLoad.
@@ -919,7 +1011,7 @@ func (i *Instruction) AsLoad(ptr Value, offset uint32, typ Type) *Instruction {
 }
 
 // AsExtLoad initializes this instruction as a store instruction with OpcodeLoad.
-func (i *Instruction) AsExtLoad(op Opcode, ptr Value, offset uint32, dst64bit bool) {
+func (i *Instruction) AsExtLoad(op Opcode, ptr Value, offset uint32, dst64bit bool) *Instruction {
 	i.opcode = op
 	i.v = ptr
 	i.u1 = uint64(offset)
@@ -928,11 +1020,42 @@ func (i *Instruction) AsExtLoad(op Opcode, ptr Value, offset uint32, dst64bit bo
 	} else {
 		i.typ = TypeI32
 	}
+	return i
+}
+
+// AsVZeroExtLoad initializes this instruction as a store instruction with OpcodeVExtLoad.
+func (i *Instruction) AsVZeroExtLoad(ptr Value, offset uint32, scalarType Type) *Instruction {
+	i.opcode = OpcodeVZeroExtLoad
+	i.v = ptr
+	i.u1 = uint64(offset)
+	i.u2 = uint64(scalarType)
+	i.typ = TypeV128
+	return i
+}
+
+// VZeroExtLoadData returns the operands for a load instruction. The returned `typ` is the scalar type of the load target.
+func (i *Instruction) VZeroExtLoadData() (ptr Value, offset uint32, typ Type) {
+	return i.v, uint32(i.u1), Type(i.u2)
+}
+
+// AsLoadSplat initializes this instruction as a store instruction with OpcodeLoadSplat.
+func (i *Instruction) AsLoadSplat(ptr Value, offset uint32, lane VecLane) *Instruction {
+	i.opcode = OpcodeLoadSplat
+	i.v = ptr
+	i.u1 = uint64(offset)
+	i.u2 = uint64(lane)
+	i.typ = TypeV128
+	return i
 }
 
 // LoadData returns the operands for a load instruction.
 func (i *Instruction) LoadData() (ptr Value, offset uint32, typ Type) {
 	return i.v, uint32(i.u1), i.typ
+}
+
+// LoadSplatData returns the operands for a load splat instruction.
+func (i *Instruction) LoadSplatData() (ptr Value, offset uint32, lane VecLane) {
+	return i.v, uint32(i.u1), VecLane(i.u2)
 }
 
 // AsStore initializes this instruction as a store instruction with OpcodeStore.
@@ -988,12 +1111,272 @@ func (i *Instruction) AsIadd(x, y Value) *Instruction {
 	return i
 }
 
+// AsVIadd initializes this instruction as an integer addition instruction with OpcodeVIadd on a vector.
+func (i *Instruction) AsVIadd(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVIadd
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsIaddPairwise initializes this instruction as a lane-wise integer extended pairwise addition instruction
+// with OpcodeIaddPairwise on a vector.
+func (i *Instruction) AsIaddPairwise(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeIaddPairwise
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVSaddSat initializes this instruction as a vector addition with saturation instruction with OpcodeVSaddSat on a vector.
+func (i *Instruction) AsVSaddSat(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVSaddSat
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVUaddSat initializes this instruction as a vector addition with saturation instruction with OpcodeVUaddSat on a vector.
+func (i *Instruction) AsVUaddSat(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVUaddSat
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVIsub initializes this instruction as an integer subtraction instruction with OpcodeVIsub on a vector.
+func (i *Instruction) AsVIsub(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVIsub
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVSsubSat initializes this instruction as a vector addition with saturation instruction with OpcodeVSsubSat on a vector.
+func (i *Instruction) AsVSsubSat(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVSsubSat
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVUsubSat initializes this instruction as a vector addition with saturation instruction with OpcodeVUsubSat on a vector.
+func (i *Instruction) AsVUsubSat(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVUsubSat
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVImin initializes this instruction as a signed integer min instruction with OpcodeVImin on a vector.
+func (i *Instruction) AsVImin(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVImin
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVUmin initializes this instruction as an unsigned integer min instruction with OpcodeVUmin on a vector.
+func (i *Instruction) AsVUmin(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVUmin
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVImax initializes this instruction as a signed integer max instruction with OpcodeVImax on a vector.
+func (i *Instruction) AsVImax(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVImax
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVUmax initializes this instruction as an unsigned integer max instruction with OpcodeVUmax on a vector.
+func (i *Instruction) AsVUmax(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVUmax
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVAvgRound initializes this instruction as an unsigned integer avg instruction, truncating to zero with OpcodeVAvgRound on a vector.
+func (i *Instruction) AsVAvgRound(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVAvgRound
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVImul initializes this instruction as an integer multiplication with OpcodeVImul on a vector.
+func (i *Instruction) AsVImul(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVImul
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsSqmulRoundSat initializes this instruction as a lane-wise saturating rounding multiplication
+// in Q15 format with OpcodeSqmulRoundSat on a vector.
+func (i *Instruction) AsSqmulRoundSat(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeSqmulRoundSat
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVIabs initializes this instruction as a vector absolute value with OpcodeVIabs.
+func (i *Instruction) AsVIabs(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVIabs
+	i.v = x
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVIneg initializes this instruction as a vector negation with OpcodeVIneg.
+func (i *Instruction) AsVIneg(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVIneg
+	i.v = x
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVIpopcnt initializes this instruction as a Population Count instruction with OpcodeVIpopcnt on a vector.
+func (i *Instruction) AsVIpopcnt(x Value, lane VecLane) *Instruction {
+	if lane != VecLaneI8x16 {
+		panic("Unsupported lane type " + lane.String())
+	}
+	i.opcode = OpcodeVIpopcnt
+	i.v = x
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVSqrt initializes this instruction as a sqrt instruction with OpcodeVSqrt on a vector.
+func (i *Instruction) AsVSqrt(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVSqrt
+	i.v = x
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVFabs initializes this instruction as a float abs instruction with OpcodeVFabs on a vector.
+func (i *Instruction) AsVFabs(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFabs
+	i.v = x
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVFneg initializes this instruction as a float neg instruction with OpcodeVFneg on a vector.
+func (i *Instruction) AsVFneg(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFneg
+	i.v = x
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVFmax initializes this instruction as a float max instruction with OpcodeVFmax on a vector.
+func (i *Instruction) AsVFmax(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFmax
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVFmin initializes this instruction as a float min instruction with OpcodeVFmin on a vector.
+func (i *Instruction) AsVFmin(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFmin
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVFadd initializes this instruction as a floating point add instruction with OpcodeVFadd on a vector.
+func (i *Instruction) AsVFadd(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFadd
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVFsub initializes this instruction as a floating point subtraction instruction with OpcodeVFsub on a vector.
+func (i *Instruction) AsVFsub(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFsub
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVFmul initializes this instruction as a floating point multiplication instruction with OpcodeVFmul on a vector.
+func (i *Instruction) AsVFmul(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFmul
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVFdiv initializes this instruction as a floating point division instruction with OpcodeVFdiv on a vector.
+func (i *Instruction) AsVFdiv(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFdiv
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
 // AsImul initializes this instruction as an integer addition instruction with OpcodeImul.
-func (i *Instruction) AsImul(x, y Value) {
+func (i *Instruction) AsImul(x, y Value) *Instruction {
 	i.opcode = OpcodeImul
 	i.v = x
 	i.v2 = y
 	i.typ = x.Type()
+	return i
 }
 
 func (i *Instruction) Insert(b Builder) *Instruction {
@@ -1027,6 +1410,84 @@ func (i *Instruction) AsFcmp(x, y Value, c FloatCmpCond) {
 	i.v2 = y
 	i.u1 = uint64(c)
 	i.typ = TypeI32
+}
+
+// AsVIcmp initializes this instruction as an integer vector comparison instruction with OpcodeVIcmp.
+func (i *Instruction) AsVIcmp(x, y Value, c IntegerCmpCond, lane VecLane) *Instruction {
+	i.opcode = OpcodeVIcmp
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(c)
+	i.u2 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsVFcmp initializes this instruction as a float comparison instruction with OpcodeVFcmp on Vector.
+func (i *Instruction) AsVFcmp(x, y Value, c FloatCmpCond, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFcmp
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(c)
+	i.typ = TypeV128
+	i.u2 = uint64(lane)
+	return i
+}
+
+// AsVCeil initializes this instruction as an instruction with OpcodeCeil.
+func (i *Instruction) AsVCeil(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVCeil
+	i.v = x
+	i.typ = x.Type()
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsVFloor initializes this instruction as an instruction with OpcodeFloor.
+func (i *Instruction) AsVFloor(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVFloor
+	i.v = x
+	i.typ = x.Type()
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsVTrunc initializes this instruction as an instruction with OpcodeTrunc.
+func (i *Instruction) AsVTrunc(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVTrunc
+	i.v = x
+	i.typ = x.Type()
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsVNearest initializes this instruction as an instruction with OpcodeNearest.
+func (i *Instruction) AsVNearest(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVNearest
+	i.v = x
+	i.typ = x.Type()
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsVMaxPseudo initializes this instruction as an instruction with OpcodeVMaxPseudo.
+func (i *Instruction) AsVMaxPseudo(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVMaxPseudo
+	i.typ = x.Type()
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsVMinPseudo initializes this instruction as an instruction with OpcodeVMinPseudo.
+func (i *Instruction) AsVMinPseudo(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVMinPseudo
+	i.typ = x.Type()
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	return i
 }
 
 // AsSDiv initializes this instruction as an integer bitwise and instruction with OpcodeSdiv.
@@ -1102,6 +1563,16 @@ func (i *Instruction) AsIshl(x, amount Value) *Instruction {
 	return i
 }
 
+// AsVIshl initializes this instruction as an integer shift left instruction with OpcodeVIshl on vector.
+func (i *Instruction) AsVIshl(x, amount Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVIshl
+	i.v = x
+	i.v2 = amount
+	i.u1 = uint64(lane)
+	i.typ = x.Type()
+	return i
+}
+
 // AsUshr initializes this instruction as an integer unsigned shift right (logical shift right) instruction with OpcodeUshr.
 func (i *Instruction) AsUshr(x, amount Value) *Instruction {
 	i.opcode = OpcodeUshr
@@ -1111,12 +1582,99 @@ func (i *Instruction) AsUshr(x, amount Value) *Instruction {
 	return i
 }
 
+// AsVUshr initializes this instruction as an integer unsigned shift right (logical shift right) instruction with OpcodeVUshr on vector.
+func (i *Instruction) AsVUshr(x, amount Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVUshr
+	i.v = x
+	i.v2 = amount
+	i.u1 = uint64(lane)
+	i.typ = x.Type()
+	return i
+}
+
 // AsSshr initializes this instruction as an integer signed shift right (arithmetic shift right) instruction with OpcodeSshr.
-func (i *Instruction) AsSshr(x, amount Value) {
+func (i *Instruction) AsSshr(x, amount Value) *Instruction {
 	i.opcode = OpcodeSshr
 	i.v = x
 	i.v2 = amount
 	i.typ = x.Type()
+	return i
+}
+
+// AsVSshr initializes this instruction as an integer signed shift right (arithmetic shift right) instruction with OpcodeVSshr on vector.
+func (i *Instruction) AsVSshr(x, amount Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVSshr
+	i.v = x
+	i.v2 = amount
+	i.u1 = uint64(lane)
+	i.typ = x.Type()
+	return i
+}
+
+// AsExtractlane initializes this instruction as an extract lane instruction with OpcodeExtractlane on vector.
+func (i *Instruction) AsExtractlane(x Value, index byte, lane VecLane, signed bool) *Instruction {
+	i.opcode = OpcodeExtractlane
+	i.v = x
+	// We do not have a field for signedness, but `index` is a byte,
+	// so we just encode the flag in the high bits of `u1`.
+	i.u1 = uint64(index)
+	if signed {
+		i.u1 = i.u1 | 1<<32
+	}
+	i.u2 = uint64(lane)
+	switch lane {
+	case VecLaneI8x16, VecLaneI16x8, VecLaneI32x4:
+		i.typ = TypeI32
+	case VecLaneI64x2:
+		i.typ = TypeI64
+	case VecLaneF32x4:
+		i.typ = TypeF32
+	case VecLaneF64x2:
+		i.typ = TypeF64
+	}
+	return i
+}
+
+// AsInsertlane initializes this instruction as an insert lane instruction with OpcodeInsertlane on vector.
+func (i *Instruction) AsInsertlane(x, y Value, index byte, lane VecLane) *Instruction {
+	i.opcode = OpcodeInsertlane
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(index)
+	i.u2 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsShuffle initializes this instruction as a shuffle instruction with OpcodeShuffle on vector.
+func (i *Instruction) AsShuffle(x, y Value, lane []byte) *Instruction {
+	i.opcode = OpcodeShuffle
+	i.v = x
+	i.v2 = y
+	// Encode the 16 bytes as 8 bytes in u1, and 8 bytes in u2.
+	i.u1 = uint64(lane[7])<<56 | uint64(lane[6])<<48 | uint64(lane[5])<<40 | uint64(lane[4])<<32 | uint64(lane[3])<<24 | uint64(lane[2])<<16 | uint64(lane[1])<<8 | uint64(lane[0])
+	i.u2 = uint64(lane[15])<<56 | uint64(lane[14])<<48 | uint64(lane[13])<<40 | uint64(lane[12])<<32 | uint64(lane[11])<<24 | uint64(lane[10])<<16 | uint64(lane[9])<<8 | uint64(lane[8])
+	i.typ = TypeV128
+	return i
+}
+
+// AsSwizzle initializes this instruction as an insert lane instruction with OpcodeSwizzle on vector.
+func (i *Instruction) AsSwizzle(x, y Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeSwizzle
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
+}
+
+// AsSplat initializes this instruction as an insert lane instruction with OpcodeSplat on vector.
+func (i *Instruction) AsSplat(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeSplat
+	i.v = x
+	i.u1 = uint64(lane)
+	i.typ = TypeV128
+	return i
 }
 
 // AsRotl initializes this instruction as a word rotate left instruction with OpcodeRotl.
@@ -1143,6 +1701,34 @@ func (i *Instruction) IcmpData() (x, y Value, c IntegerCmpCond) {
 // FcmpData returns the operands and comparison condition of this floating-point comparison instruction.
 func (i *Instruction) FcmpData() (x, y Value, c FloatCmpCond) {
 	return i.v, i.v2, FloatCmpCond(i.u1)
+}
+
+// VIcmpData returns the operands and comparison condition of this integer comparison instruction on vector.
+func (i *Instruction) VIcmpData() (x, y Value, c IntegerCmpCond, l VecLane) {
+	return i.v, i.v2, IntegerCmpCond(i.u1), VecLane(i.u2)
+}
+
+// VFcmpData returns the operands and comparison condition of this float comparison instruction on vector.
+func (i *Instruction) VFcmpData() (x, y Value, c FloatCmpCond, l VecLane) {
+	return i.v, i.v2, FloatCmpCond(i.u1), VecLane(i.u2)
+}
+
+// ExtractlaneData returns the operands and sign flag of Extractlane on vector.
+func (i *Instruction) ExtractlaneData() (x Value, index byte, signed bool, l VecLane) {
+	x = i.v
+	index = byte(0b00001111 & i.u1)
+	signed = i.u1>>32 != 0
+	l = VecLane(i.u2)
+	return
+}
+
+// InsertlaneData returns the operands and sign flag of Insertlane on vector.
+func (i *Instruction) InsertlaneData() (x, y Value, index byte, l VecLane) {
+	x = i.v
+	y = i.v2
+	index = byte(i.u1)
+	l = VecLane(i.u2)
+	return
 }
 
 // AsFadd initializes this instruction as a floating-point addition instruction with OpcodeFadd.
@@ -1209,6 +1795,100 @@ func (i *Instruction) AsF64const(f float64) *Instruction {
 	return i
 }
 
+// AsVconst initializes this instruction as a vector constant instruction with OpcodeVconst.
+func (i *Instruction) AsVconst(lo, hi uint64) *Instruction {
+	i.opcode = OpcodeVconst
+	i.typ = TypeV128
+	i.u1 = lo
+	i.u2 = hi
+	return i
+}
+
+// AsVbnot initializes this instruction as a vector negation instruction with OpcodeVbnot.
+func (i *Instruction) AsVbnot(v Value) *Instruction {
+	i.opcode = OpcodeVbnot
+	i.typ = TypeV128
+	i.v = v
+	return i
+}
+
+// AsVband initializes this instruction as an and vector instruction with OpcodeVband.
+func (i *Instruction) AsVband(x, y Value) *Instruction {
+	i.opcode = OpcodeVband
+	i.typ = TypeV128
+	i.v = x
+	i.v2 = y
+	return i
+}
+
+// AsVbor initializes this instruction as an or vector instruction with OpcodeVbor.
+func (i *Instruction) AsVbor(x, y Value) *Instruction {
+	i.opcode = OpcodeVbor
+	i.typ = TypeV128
+	i.v = x
+	i.v2 = y
+	return i
+}
+
+// AsVbxor initializes this instruction as a xor vector instruction with OpcodeVbxor.
+func (i *Instruction) AsVbxor(x, y Value) *Instruction {
+	i.opcode = OpcodeVbxor
+	i.typ = TypeV128
+	i.v = x
+	i.v2 = y
+	return i
+}
+
+// AsVbandnot initializes this instruction as an and-not vector instruction with OpcodeVbandnot.
+func (i *Instruction) AsVbandnot(x, y Value) *Instruction {
+	i.opcode = OpcodeVbandnot
+	i.typ = TypeV128
+	i.v = x
+	i.v2 = y
+	return i
+}
+
+// AsVbitselect initializes this instruction as a bit select vector instruction with OpcodeVbitselect.
+func (i *Instruction) AsVbitselect(c, x, y Value) *Instruction {
+	i.opcode = OpcodeVbitselect
+	i.typ = TypeV128
+	i.v = c
+	i.v2 = x
+	i.v3 = y
+	return i
+}
+
+// AsVanyTrue initializes this instruction as an anyTrue vector instruction with OpcodeVanyTrue.
+func (i *Instruction) AsVanyTrue(x Value) *Instruction {
+	i.opcode = OpcodeVanyTrue
+	i.typ = TypeI32
+	i.v = x
+	return i
+}
+
+// AsVallTrue initializes this instruction as an allTrue vector instruction with OpcodeVallTrue.
+func (i *Instruction) AsVallTrue(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVallTrue
+	i.typ = TypeI32
+	i.v = x
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsVhighBits initializes this instruction as a highBits vector instruction with OpcodeVhighBits.
+func (i *Instruction) AsVhighBits(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeVhighBits
+	i.typ = TypeI32
+	i.v = x
+	i.u1 = uint64(lane)
+	return i
+}
+
+// VconstData returns the operands of this vector constant instruction.
+func (i *Instruction) VconstData() (lo, hi uint64) {
+	return i.u1, i.u2
+}
+
 // AsReturn initializes this instruction as a return instruction with OpcodeReturn.
 func (i *Instruction) AsReturn(vs []Value) *Instruction {
 	i.opcode = OpcodeReturn
@@ -1221,6 +1901,24 @@ func (i *Instruction) AsIreduce(v Value, dstType Type) *Instruction {
 	i.opcode = OpcodeIreduce
 	i.v = v
 	i.typ = dstType
+	return i
+}
+
+// AsWiden initializes this instruction as a signed or unsigned widen instruction
+// on low half or high half of the given vector with OpcodeSwidenLow, OpcodeUwidenLow, OpcodeSwidenHigh, OpcodeUwidenHigh.
+func (i *Instruction) AsWiden(v Value, lane VecLane, signed, low bool) *Instruction {
+	switch {
+	case signed && low:
+		i.opcode = OpcodeSwidenLow
+	case !signed && low:
+		i.opcode = OpcodeUwidenLow
+	case signed && !low:
+		i.opcode = OpcodeSwidenHigh
+	case !signed && !low:
+		i.opcode = OpcodeUwidenHigh
+	}
+	i.v = v
+	i.u1 = uint64(lane)
 	return i
 }
 
@@ -1237,11 +1935,12 @@ func (i *Instruction) AsExitWithCode(ctx Value, code wazevoapi.ExitCode) {
 }
 
 // AsExitIfTrueWithCode initializes this instruction as a trap instruction with OpcodeExitIfTrueWithCode.
-func (i *Instruction) AsExitIfTrueWithCode(ctx, c Value, code wazevoapi.ExitCode) {
+func (i *Instruction) AsExitIfTrueWithCode(ctx, c Value, code wazevoapi.ExitCode) *Instruction {
 	i.opcode = OpcodeExitIfTrueWithCode
 	i.v = ctx
 	i.v2 = c
 	i.u1 = uint64(code)
+	return i
 }
 
 // ExitWithCodeData returns the context and exit code of OpcodeExitWithCode.
@@ -1323,11 +2022,12 @@ func (i *Instruction) AsBrz(v Value, args []Value, target BasicBlock) {
 }
 
 // AsBrnz initializes this instruction as a branch-if-not-zero instruction with OpcodeBrnz.
-func (i *Instruction) AsBrnz(v Value, args []Value, target BasicBlock) {
+func (i *Instruction) AsBrnz(v Value, args []Value, target BasicBlock) *Instruction {
 	i.opcode = OpcodeBrnz
 	i.v = v
 	i.vs = args
 	i.blk = target
+	return i
 }
 
 // AsBrTable initializes this instruction as a branch-table instruction with OpcodeBrTable.
@@ -1509,11 +2209,16 @@ func (i *Instruction) AsFcvtFromInt(x Value, signed bool, dst64bit bool) *Instru
 }
 
 // AsFcvtToInt initializes this instruction as an instruction with either OpcodeFcvtToUint or OpcodeFcvtToSint
-func (i *Instruction) AsFcvtToInt(x, ctx Value, signed bool, dst64bit bool) *Instruction {
-	if signed {
+func (i *Instruction) AsFcvtToInt(x, ctx Value, signed bool, dst64bit bool, sat bool) *Instruction {
+	switch {
+	case signed && !sat:
 		i.opcode = OpcodeFcvtToSint
-	} else {
+	case !signed && !sat:
 		i.opcode = OpcodeFcvtToUint
+	case signed && sat:
+		i.opcode = OpcodeFcvtToSintSat
+	case !signed && sat:
+		i.opcode = OpcodeFcvtToUintSat
 	}
 	i.v = x
 	i.v2 = ctx
@@ -1525,8 +2230,61 @@ func (i *Instruction) AsFcvtToInt(x, ctx Value, signed bool, dst64bit bool) *Ins
 	return i
 }
 
+// AsVFcvtToIntSat initializes this instruction as an instruction with either OpcodeVFcvtToSintSat or OpcodeVFcvtToUintSat
+func (i *Instruction) AsVFcvtToIntSat(x Value, lane VecLane, signed bool) *Instruction {
+	if signed {
+		i.opcode = OpcodeVFcvtToSintSat
+	} else {
+		i.opcode = OpcodeVFcvtToUintSat
+	}
+	i.v = x
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsVFcvtFromInt initializes this instruction as an instruction with either OpcodeVFcvtToSintSat or OpcodeVFcvtToUintSat
+func (i *Instruction) AsVFcvtFromInt(x Value, lane VecLane, signed bool) *Instruction {
+	if signed {
+		i.opcode = OpcodeVFcvtFromSint
+	} else {
+		i.opcode = OpcodeVFcvtFromUint
+	}
+	i.v = x
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsNarrow initializes this instruction as an instruction with either OpcodeSnarrow or OpcodeUnarrow
+func (i *Instruction) AsNarrow(x, y Value, lane VecLane, signed bool) *Instruction {
+	if signed {
+		i.opcode = OpcodeSnarrow
+	} else {
+		i.opcode = OpcodeUnarrow
+	}
+	i.v = x
+	i.v2 = y
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsFvpromoteLow initializes this instruction as an instruction with OpcodeFvpromoteLow
+func (i *Instruction) AsFvpromoteLow(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeFvpromoteLow
+	i.v = x
+	i.u1 = uint64(lane)
+	return i
+}
+
+// AsFvdemote initializes this instruction as an instruction with OpcodeFvdemote
+func (i *Instruction) AsFvdemote(x Value, lane VecLane) *Instruction {
+	i.opcode = OpcodeFvdemote
+	i.v = x
+	i.u1 = uint64(lane)
+	return i
+}
+
 // AsSExtend initializes this instruction as a sign extension instruction with OpcodeSExtend.
-func (i *Instruction) AsSExtend(v Value, from, to byte) {
+func (i *Instruction) AsSExtend(v Value, from, to byte) *Instruction {
 	i.opcode = OpcodeSExtend
 	i.v = v
 	i.u1 = uint64(from)<<8 | uint64(to)
@@ -1535,10 +2293,11 @@ func (i *Instruction) AsSExtend(v Value, from, to byte) {
 	} else {
 		i.typ = TypeI32
 	}
+	return i
 }
 
 // AsUExtend initializes this instruction as an unsigned extension instruction with OpcodeUExtend.
-func (i *Instruction) AsUExtend(v Value, from, to byte) {
+func (i *Instruction) AsUExtend(v Value, from, to byte) *Instruction {
 	i.opcode = OpcodeUExtend
 	i.v = v
 	i.u1 = uint64(from)<<8 | uint64(to)
@@ -1547,6 +2306,7 @@ func (i *Instruction) AsUExtend(v Value, from, to byte) {
 	} else {
 		i.typ = TypeI32
 	}
+	return i
 }
 
 func (i *Instruction) ExtendData() (from, to byte, signed bool) {
@@ -1613,11 +2373,13 @@ func (i *Instruction) Format(b Builder) string {
 		}
 	case OpcodeStore, OpcodeIstore8, OpcodeIstore16, OpcodeIstore32:
 		instSuffix = fmt.Sprintf(" %s, %s, %#x", i.v.Format(b), i.v2.Format(b), int32(i.u1))
-	case OpcodeLoad:
+	case OpcodeLoad, OpcodeVZeroExtLoad:
 		instSuffix = fmt.Sprintf(" %s, %#x", i.v.Format(b), int32(i.u1))
+	case OpcodeLoadSplat:
+		instSuffix = fmt.Sprintf(".%s %s, %#x", VecLane(i.u2), i.v.Format(b), int32(i.u1))
 	case OpcodeUload8, OpcodeUload16, OpcodeUload32, OpcodeSload8, OpcodeSload16, OpcodeSload32:
 		instSuffix = fmt.Sprintf(" %s, %#x", i.v.Format(b), int32(i.u1))
-	case OpcodeSelect:
+	case OpcodeSelect, OpcodeVbitselect:
 		instSuffix = fmt.Sprintf(" %s, %s, %s", i.v.Format(b), i.v2.Format(b), i.v3.Format(b))
 	case OpcodeIconst:
 		switch i.typ {
@@ -1626,6 +2388,8 @@ func (i *Instruction) Format(b Builder) string {
 		case TypeI64:
 			instSuffix = fmt.Sprintf("_64 %#x", i.u1)
 		}
+	case OpcodeVconst:
+		instSuffix = fmt.Sprintf(" %016x %016x", i.u1, i.u2)
 	case OpcodeF32const:
 		instSuffix = fmt.Sprintf(" %f", math.Float32frombits(uint32(i.u1)))
 	case OpcodeF64const:
@@ -1673,13 +2437,48 @@ func (i *Instruction) Format(b Builder) string {
 		}
 		instSuffix += "]"
 	case OpcodeBand, OpcodeBor, OpcodeBxor, OpcodeRotr, OpcodeRotl, OpcodeIshl, OpcodeSshr, OpcodeUshr,
-		OpcodeSdiv, OpcodeUdiv, OpcodeFcopysign, OpcodeSrem, OpcodeUrem:
+		OpcodeSdiv, OpcodeUdiv, OpcodeFcopysign, OpcodeSrem, OpcodeUrem,
+		OpcodeVbnot, OpcodeVbxor, OpcodeVbor, OpcodeVband, OpcodeVbandnot, OpcodeVIcmp, OpcodeVFcmp:
 		instSuffix = fmt.Sprintf(" %s, %s", i.v.Format(b), i.v2.Format(b))
 	case OpcodeUndefined:
 	case OpcodeClz, OpcodeCtz, OpcodePopcnt, OpcodeFneg, OpcodeFcvtToSint, OpcodeFcvtToUint, OpcodeFcvtFromSint,
-		OpcodeFcvtFromUint, OpcodeFdemote, OpcodeFpromote, OpcodeIreduce, OpcodeBitcast, OpcodeSqrt, OpcodeFabs,
+		OpcodeFcvtFromUint, OpcodeFcvtToSintSat, OpcodeFcvtToUintSat, OpcodeFdemote, OpcodeFpromote, OpcodeIreduce, OpcodeBitcast, OpcodeSqrt, OpcodeFabs,
 		OpcodeCeil, OpcodeFloor, OpcodeTrunc, OpcodeNearest:
 		instSuffix = " " + i.v.Format(b)
+	case OpcodeVIadd, OpcodeIaddPairwise, OpcodeVSaddSat, OpcodeVUaddSat, OpcodeVIsub, OpcodeVSsubSat, OpcodeVUsubSat,
+		OpcodeVImin, OpcodeVUmin, OpcodeVImax, OpcodeVUmax, OpcodeVImul, OpcodeVAvgRound,
+		OpcodeVFadd, OpcodeVFsub, OpcodeVFmul, OpcodeVFdiv,
+		OpcodeVIshl, OpcodeVSshr, OpcodeVUshr,
+		OpcodeVFmin, OpcodeVFmax, OpcodeVMinPseudo, OpcodeVMaxPseudo,
+		OpcodeSnarrow, OpcodeUnarrow, OpcodeSwizzle, OpcodeSqmulRoundSat:
+		instSuffix = fmt.Sprintf(".%s %s, %s", VecLane(i.u1), i.v.Format(b), i.v2.Format(b))
+	case OpcodeVIabs, OpcodeVIneg, OpcodeVIpopcnt, OpcodeVhighBits, OpcodeVallTrue, OpcodeVanyTrue,
+		OpcodeVFabs, OpcodeVFneg, OpcodeVSqrt, OpcodeVCeil, OpcodeVFloor, OpcodeVTrunc, OpcodeVNearest,
+		OpcodeVFcvtToUintSat, OpcodeVFcvtToSintSat, OpcodeVFcvtFromUint, OpcodeVFcvtFromSint,
+		OpcodeFvpromoteLow, OpcodeFvdemote, OpcodeSwidenLow, OpcodeUwidenLow, OpcodeSwidenHigh, OpcodeUwidenHigh,
+		OpcodeSplat:
+		instSuffix = fmt.Sprintf(".%s %s", VecLane(i.u1), i.v.Format(b))
+	case OpcodeExtractlane:
+		var signedness string
+		if i.u1 != 0 {
+			signedness = "signed"
+		} else {
+			signedness = "unsigned"
+		}
+		instSuffix = fmt.Sprintf(".%s %d, %s (%s)", VecLane(i.u2), 0x0000FFFF&i.u1, i.v.Format(b), signedness)
+	case OpcodeInsertlane:
+		instSuffix = fmt.Sprintf(".%s %d, %s, %s", VecLane(i.u2), i.u1, i.v.Format(b), i.v2.Format(b))
+	case OpcodeShuffle:
+		lanes := make([]byte, 16)
+		for idx := 0; idx < 8; idx++ {
+			lanes[idx] = byte(i.u1 >> (8 * idx))
+		}
+		for idx := 0; idx < 8; idx++ {
+			lanes[idx+8] = byte(i.u2 >> (8 * idx))
+		}
+		// Prints Shuffle.[0 1 2 3 4 5 6 7 ...] v2, v3
+		instSuffix = fmt.Sprintf(".%v %s, %s", lanes, i.v.Format(b), i.v2.Format(b))
+
 	default:
 		panic(fmt.Sprintf("TODO: format for %s", i.opcode))
 	}
@@ -1766,26 +2565,10 @@ func (o Opcode) String() (ret string) {
 		return "Insertlane"
 	case OpcodeExtractlane:
 		return "Extractlane"
-	case OpcodeSmin:
-		return "Smin"
-	case OpcodeUmin:
-		return "Umin"
-	case OpcodeSmax:
-		return "Smax"
-	case OpcodeUmax:
-		return "Umax"
-	case OpcodeAvgRound:
-		return "AvgRound"
-	case OpcodeUaddSat:
-		return "UaddSat"
-	case OpcodeSaddSat:
-		return "SaddSat"
-	case OpcodeUsubSat:
-		return "UsubSat"
-	case OpcodeSsubSat:
-		return "SsubSat"
 	case OpcodeLoad:
 		return "Load"
+	case OpcodeLoadSplat:
+		return "LoadSplat"
 	case OpcodeStore:
 		return "Store"
 	case OpcodeUload8:
@@ -1806,18 +2589,6 @@ func (o Opcode) String() (ret string) {
 		return "Sload32"
 	case OpcodeIstore32:
 		return "Istore32"
-	case OpcodeUload8x8:
-		return "Uload8x8"
-	case OpcodeSload8x8:
-		return "Sload8x8"
-	case OpcodeUload16x4:
-		return "Uload16x4"
-	case OpcodeSload16x4:
-		return "Sload16x4"
-	case OpcodeUload32x2:
-		return "Uload32x2"
-	case OpcodeSload32x2:
-		return "Sload32x2"
 	case OpcodeIconst:
 		return "Iconst"
 	case OpcodeF32const:
@@ -1830,14 +2601,6 @@ func (o Opcode) String() (ret string) {
 		return "Shuffle"
 	case OpcodeSelect:
 		return "Select"
-	case OpcodeBitselect:
-		return "Bitselect"
-	case OpcodeVsplit:
-		return "Vsplit"
-	case OpcodeVconcat:
-		return "Vconcat"
-	case OpcodeVselect:
-		return "Vselect"
 	case OpcodeVanyTrue:
 		return "VanyTrue"
 	case OpcodeVallTrue:
@@ -1848,18 +2611,14 @@ func (o Opcode) String() (ret string) {
 		return "Icmp"
 	case OpcodeIcmpImm:
 		return "IcmpImm"
+	case OpcodeVIcmp:
+		return "VIcmp"
 	case OpcodeIadd:
 		return "Iadd"
 	case OpcodeIsub:
 		return "Isub"
 	case OpcodeImul:
 		return "Imul"
-	case OpcodeUmulhi:
-		return "Umulhi"
-	case OpcodeSmulhi:
-		return "Smulhi"
-	case OpcodeSqmulRoundSat:
-		return "SqmulRoundSat"
 	case OpcodeUdiv:
 		return "Udiv"
 	case OpcodeSdiv:
@@ -1868,46 +2627,6 @@ func (o Opcode) String() (ret string) {
 		return "Urem"
 	case OpcodeSrem:
 		return "Srem"
-	case OpcodeIaddImm:
-		return "IaddImm"
-	case OpcodeImulImm:
-		return "ImulImm"
-	case OpcodeUdivImm:
-		return "UdivImm"
-	case OpcodeSdivImm:
-		return "SdivImm"
-	case OpcodeUremImm:
-		return "UremImm"
-	case OpcodeSremImm:
-		return "SremImm"
-	case OpcodeIrsubImm:
-		return "IrsubImm"
-	case OpcodeIaddCin:
-		return "IaddCin"
-	case OpcodeIaddIfcin:
-		return "IaddIfcin"
-	case OpcodeIaddCout:
-		return "IaddCout"
-	case OpcodeIaddIfcout:
-		return "IaddIfcout"
-	case OpcodeIaddCarry:
-		return "IaddCarry"
-	case OpcodeIaddIfcarry:
-		return "IaddIfcarry"
-	case OpcodeUaddOverflowTrap:
-		return "UaddOverflowTrap"
-	case OpcodeIsubBin:
-		return "IsubBin"
-	case OpcodeIsubIfbin:
-		return "IsubIfbin"
-	case OpcodeIsubBout:
-		return "IsubBout"
-	case OpcodeIsubIfbout:
-		return "IsubIfbout"
-	case OpcodeIsubBorrow:
-		return "IsubBorrow"
-	case OpcodeIsubIfborrow:
-		return "IsubIfborrow"
 	case OpcodeBand:
 		return "Band"
 	case OpcodeBor:
@@ -1916,40 +2635,16 @@ func (o Opcode) String() (ret string) {
 		return "Bxor"
 	case OpcodeBnot:
 		return "Bnot"
-	case OpcodeBandNot:
-		return "BandNot"
-	case OpcodeBorNot:
-		return "BorNot"
-	case OpcodeBxorNot:
-		return "BxorNot"
-	case OpcodeBandImm:
-		return "BandImm"
-	case OpcodeBorImm:
-		return "BorImm"
-	case OpcodeBxorImm:
-		return "BxorImm"
 	case OpcodeRotl:
 		return "Rotl"
 	case OpcodeRotr:
 		return "Rotr"
-	case OpcodeRotlImm:
-		return "RotlImm"
-	case OpcodeRotrImm:
-		return "RotrImm"
 	case OpcodeIshl:
 		return "Ishl"
 	case OpcodeUshr:
 		return "Ushr"
 	case OpcodeSshr:
 		return "Sshr"
-	case OpcodeIshlImm:
-		return "IshlImm"
-	case OpcodeUshrImm:
-		return "UshrImm"
-	case OpcodeSshrImm:
-		return "SshrImm"
-	case OpcodeBitrev:
-		return "Bitrev"
 	case OpcodeClz:
 		return "Clz"
 	case OpcodeCtz:
@@ -1966,6 +2661,8 @@ func (o Opcode) String() (ret string) {
 		return "Fmul"
 	case OpcodeFdiv:
 		return "Fdiv"
+	case OpcodeSqmulRoundSat:
+		return "SqmulRoundSat"
 	case OpcodeSqrt:
 		return "Sqrt"
 	case OpcodeFneg:
@@ -1988,8 +2685,6 @@ func (o Opcode) String() (ret string) {
 		return "Nearest"
 	case OpcodeBitcast:
 		return "Bitcast"
-	case OpcodeScalarToVector:
-		return "ScalarToVector"
 	case OpcodeBmask:
 		return "Bmask"
 	case OpcodeIreduce:
@@ -1998,8 +2693,6 @@ func (o Opcode) String() (ret string) {
 		return "Snarrow"
 	case OpcodeUnarrow:
 		return "Unarrow"
-	case OpcodeUunarrow:
-		return "Uunarrow"
 	case OpcodeSwidenLow:
 		return "SwidenLow"
 	case OpcodeSwidenHigh:
@@ -2048,8 +2741,98 @@ func (o Opcode) String() (ret string) {
 		return "AtomicStore"
 	case OpcodeFence:
 		return "Fence"
-	case OpcodeExtractVector:
-		return "ExtractVector"
+	case OpcodeVbor:
+		return "Vbor"
+	case OpcodeVbxor:
+		return "Vbxor"
+	case OpcodeVband:
+		return "Vband"
+	case OpcodeVbandnot:
+		return "Vbandnot"
+	case OpcodeVbnot:
+		return "Vbnot"
+	case OpcodeVbitselect:
+		return "Vbitselect"
+	case OpcodeVIadd:
+		return "VIadd"
+	case OpcodeVSaddSat:
+		return "VSaddSat"
+	case OpcodeVUaddSat:
+		return "VUaddSat"
+	case OpcodeVSsubSat:
+		return "VSsubSat"
+	case OpcodeVUsubSat:
+		return "VUsubSat"
+	case OpcodeVAvgRound:
+		return "OpcodeVAvgRound"
+	case OpcodeVIsub:
+		return "VIsub"
+	case OpcodeVImin:
+		return "VImin"
+	case OpcodeVUmin:
+		return "VUmin"
+	case OpcodeVImax:
+		return "VImax"
+	case OpcodeVUmax:
+		return "VUmax"
+	case OpcodeVImul:
+		return "VImul"
+	case OpcodeVIabs:
+		return "VIabs"
+	case OpcodeVIneg:
+		return "VIneg"
+	case OpcodeVIpopcnt:
+		return "VIpopcnt"
+	case OpcodeVIshl:
+		return "VIshl"
+	case OpcodeVUshr:
+		return "VUshr"
+	case OpcodeVSshr:
+		return "VSshr"
+	case OpcodeVFabs:
+		return "VFabs"
+	case OpcodeVFmax:
+		return "VFmax"
+	case OpcodeVFmin:
+		return "VFmin"
+	case OpcodeVFneg:
+		return "VFneg"
+	case OpcodeVFadd:
+		return "VFadd"
+	case OpcodeVFsub:
+		return "VFsub"
+	case OpcodeVFmul:
+		return "VFmul"
+	case OpcodeVFdiv:
+		return "VFdiv"
+	case OpcodeVFcmp:
+		return "VFcmp"
+	case OpcodeVCeil:
+		return "VCeil"
+	case OpcodeVFloor:
+		return "VFloor"
+	case OpcodeVTrunc:
+		return "VTrunc"
+	case OpcodeVNearest:
+		return "VNearest"
+	case OpcodeVMaxPseudo:
+		return "VMaxPseudo"
+	case OpcodeVMinPseudo:
+		return "VMinPseudo"
+	case OpcodeVSqrt:
+		return "VSqrt"
+	case OpcodeVFcvtToUintSat:
+		return "VFcvtToUintSat"
+	case OpcodeVFcvtToSintSat:
+		return "VFcvtToSintSat"
+	case OpcodeVFcvtFromUint:
+		return "VFcvtFromUint"
+	case OpcodeVFcvtFromSint:
+		return "VFcvtFromSint"
+	case OpcodeFvpromoteLow:
+		return "FvpromoteLow"
+	case OpcodeVZeroExtLoad:
+		return "VZeroExtLoad"
 	}
 	panic(fmt.Sprintf("unknown opcode %d", o))
 }

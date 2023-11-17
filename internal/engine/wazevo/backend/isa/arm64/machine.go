@@ -32,14 +32,15 @@ type (
 		// ssaBlockIDToLabels maps an SSA block ID to the label.
 		ssaBlockIDToLabels []label
 		// labelToInstructions maps a label to the instructions of the region which the label represents.
-		labelPositions map[label]*labelPosition
-		orderedLabels  []*labelPosition
+		labelPositions     map[label]*labelPosition
+		orderedBlockLabels []*labelPosition
+		labelPositionPool  wazevoapi.Pool[labelPosition]
 
 		// addendsWorkQueue is used during address lowering, defined here for reuse.
-		addendsWorkQueue []ssa.Value
-		addends32        []addend32
+		addendsWorkQueue queue[ssa.Value]
+		addends32        queue[addend32]
 		// addends64 is used during address lowering, defined here for reuse.
-		addends64              []regalloc.VReg
+		addends64              queue[regalloc.VReg]
 		unresolvedAddressModes []*instruction
 
 		// spillSlotSize is the size of the stack slot in bytes used for spilling registers.
@@ -80,6 +81,8 @@ type (
 
 		maxRequiredStackSizeForCalls int64
 		stackBoundsCheckDisabled     bool
+
+		regAllocStarted bool
 	}
 
 	addend32 struct {
@@ -109,10 +112,11 @@ const (
 // NewBackend returns a new backend for arm64.
 func NewBackend() backend.Machine {
 	m := &machine{
-		instrPool:      wazevoapi.NewPool[instruction](),
-		labelPositions: make(map[label]*labelPosition),
-		spillSlots:     make(map[regalloc.VRegID]int64),
-		nextLabel:      invalidLabel,
+		instrPool:         wazevoapi.NewPool[instruction](resetInstruction),
+		labelPositionPool: wazevoapi.NewPool[labelPosition](resetLabelPosition),
+		labelPositions:    make(map[label]*labelPosition),
+		spillSlots:        make(map[regalloc.VRegID]int64),
+		nextLabel:         invalidLabel,
 	}
 	m.regAllocFn.m = m
 	m.regAllocFn.labelToRegAllocBlockIndex = make(map[label]int)
@@ -121,13 +125,14 @@ func NewBackend() backend.Machine {
 
 // Reset implements backend.Machine.
 func (m *machine) Reset() {
+	m.regAllocStarted = false
 	m.instrPool.Reset()
+	m.labelPositionPool.Reset()
 	m.currentSSABlk = nil
-	m.nextLabel = invalidLabel
-	m.pendingInstructions = m.pendingInstructions[:0]
-	for _, v := range m.labelPositions {
-		v.begin, v.end = nil, nil
+	for l := label(0); l <= m.nextLabel; l++ {
+		delete(m.labelPositions, l)
 	}
+	m.pendingInstructions = m.pendingInstructions[:0]
 	m.clobberedRegs = m.clobberedRegs[:0]
 	for key := range m.spillSlots {
 		m.clobberedRegs = append(m.clobberedRegs, regalloc.VReg(key))
@@ -136,13 +141,15 @@ func (m *machine) Reset() {
 		delete(m.spillSlots, regalloc.VRegID(key))
 	}
 	m.clobberedRegs = m.clobberedRegs[:0]
-	m.orderedLabels = m.orderedLabels[:0]
+	m.orderedBlockLabels = m.orderedBlockLabels[:0]
 	m.regAllocFn.reset()
 	m.spillSlotSize = 0
 	m.unresolvedAddressModes = m.unresolvedAddressModes[:0]
 	m.rootInstr = nil
 	m.ssaBlockIDToLabels = m.ssaBlockIDToLabels[:0]
 	m.perBlockHead, m.perBlockEnd = nil, nil
+	m.maxRequiredStackSizeForCalls = 0
+	m.nextLabel = invalidLabel
 }
 
 // InitializeABI implements backend.Machine InitializeABI.
@@ -198,10 +205,10 @@ func (m *machine) StartBlock(blk ssa.BasicBlock) {
 
 	labelPos, ok := m.labelPositions[l]
 	if !ok {
-		labelPos = &labelPosition{}
+		labelPos = m.allocateLabelPosition()
 		m.labelPositions[l] = labelPos
 	}
-	m.orderedLabels = append(m.orderedLabels, labelPos)
+	m.orderedBlockLabels = append(m.orderedBlockLabels, labelPos)
 	labelPos.begin, labelPos.end = end, end
 	m.regAllocFn.addBlock(blk, l, labelPos)
 }
@@ -223,6 +230,27 @@ func (m *machine) insert(i *instruction) {
 	m.pendingInstructions = append(m.pendingInstructions, i)
 }
 
+func (m *machine) insertBrTargetLabel() label {
+	l := m.allocateLabel()
+	nop := m.allocateInstr()
+	nop.asNop0WithLabel(l)
+	m.insert(nop)
+	pos := m.allocateLabelPosition()
+	pos.begin, pos.end = nop, nop
+	m.labelPositions[l] = pos
+	return l
+}
+
+func (m *machine) allocateLabelPosition() *labelPosition {
+	l := m.labelPositionPool.Allocate()
+	return l
+}
+
+func resetLabelPosition(l *labelPosition) {
+	*l = labelPosition{}
+}
+
+// FlushPendingInstructions implements backend.Machine.
 func (m *machine) FlushPendingInstructions() {
 	l := len(m.pendingInstructions)
 	if l == 0 {
@@ -253,18 +281,18 @@ func (l label) String() string {
 // allocateInstr allocates an instruction.
 func (m *machine) allocateInstr() *instruction {
 	instr := m.instrPool.Allocate()
+	if !m.regAllocStarted {
+		instr.addedBeforeRegAlloc = true
+	}
 	return instr
 }
 
-// allocateInstrAfterLowering allocates an instruction that is added after lowering.
-func (m *machine) allocateInstrAfterLowering() *instruction {
-	instr := m.instrPool.Allocate()
-	instr.addedAfterLowering = true
-	return instr
+func resetInstruction(i *instruction) {
+	*i = instruction{}
 }
 
 func (m *machine) allocateNop() *instruction {
-	instr := m.instrPool.Allocate()
+	instr := m.allocateInstr()
 	instr.asNop0()
 	return instr
 }
@@ -301,18 +329,8 @@ func (m *machine) resolveAddressingMode(arg0offset, ret0offset int64, i *instruc
 	} else {
 		// This case, we load the offset into the temporary register,
 		// and then use it as the index register.
-		m.lowerConstantI64(tmpRegVReg, amode.imm)
-		// lowerConstantI64 adds instructions into m.pendingInstructions,
-		// so we manually link them together.
-		cur := i.prev
-		for _, inserted := range m.pendingInstructions {
-			cur.next = inserted
-			inserted.prev = cur
-			cur = inserted
-		}
-		cur.next = i
-		i.prev = cur
-		m.pendingInstructions = m.pendingInstructions[:0]
+		newPrev := m.lowerConstantI64AndInsert(i.prev, tmpRegVReg, amode.imm)
+		linkInstr(newPrev, i)
 		*amode = addressMode{kind: addressModeKindRegReg, rn: amode.rn, rm: tmpRegVReg, extOp: extendOpUXTX /* indicates rm reg is 64-bit */}
 	}
 }
@@ -328,9 +346,21 @@ func (m *machine) ResolveRelativeAddresses() {
 
 	// Next, in order to determine the offsets of relative jumps, we have to calculate the size of each label.
 	var offset int64
-	for _, pos := range m.orderedLabels {
+	for _, pos := range m.orderedBlockLabels {
 		pos.binaryOffset = offset
-		size := binarySize(pos.begin, pos.end)
+		var size int64
+		for cur := pos.begin; ; cur = cur.next {
+			if cur.kind == nop0 {
+				l := cur.nop0Label()
+				if pos, ok := m.labelPositions[l]; ok {
+					pos.binaryOffset = offset + size
+				}
+			}
+			size += cur.size()
+			if cur == pos.end {
+				break
+			}
+		}
 		pos.binarySize = size
 		offset += size
 	}
@@ -347,8 +377,8 @@ func (m *machine) ResolveRelativeAddresses() {
 			}
 			divided := diff >> 2
 			if divided < minSignedInt26 || divided > maxSignedInt26 {
-				// Though, this means the currently compiled single function is extremely large.
-				panic("TODO: implement branch relocation for large unconditional branch larger than 26-bit range")
+				// This means the currently compiled single function is extremely large.
+				panic("BUG: implement branch relocation for large unconditional branch larger than 26-bit range")
 			}
 			cur.brOffsetResolved(diff)
 		case condBr:
@@ -362,7 +392,8 @@ func (m *machine) ResolveRelativeAddresses() {
 				divided := diff >> 2
 				if divided < minSignedInt19 || divided > maxSignedInt19 {
 					// This case we can insert "trampoline block" in the middle and jump to it.
-					// After that, we need to re-calculate the offset of labels after the trampoline block.
+					// After that, we need to re-calculate the offset of labels after the trampoline block by
+					// recursively calling this function.
 					panic("TODO: implement branch relocation for large conditional branch larger than 19-bit range")
 				}
 				cur.condBrOffsetResolve(diff)
@@ -375,6 +406,8 @@ func (m *machine) ResolveRelativeAddresses() {
 				cur.targets[i] = uint32(diff)
 			}
 			cur.brTableSequenceOffsetsResolved()
+		case emitSourceOffsetInfo:
+			m.compiler.AddSourceOffsetInfo(currentOffset, cur.sourceOffsetInfo())
 		}
 		currentOffset += cur.size()
 	}
@@ -445,7 +478,7 @@ func (m *machine) InsertReturn() {
 	m.insert(i)
 }
 
-func (m *machine) getVRegSpillSlotOffset(id regalloc.VRegID, size byte) int64 {
+func (m *machine) getVRegSpillSlotOffsetFromSP(id regalloc.VRegID, size byte) int64 {
 	offset, ok := m.spillSlots[id]
 	if !ok {
 		offset = m.spillSlotSize
@@ -453,7 +486,7 @@ func (m *machine) getVRegSpillSlotOffset(id regalloc.VRegID, size byte) int64 {
 		m.spillSlots[id] = offset
 		m.spillSlotSize += int64(size)
 	}
-	return offset
+	return offset + 16 // spill slot starts above the clobbered registers and the frame size.
 }
 
 func (m *machine) clobberedRegSlotSize() int64 {
@@ -461,7 +494,9 @@ func (m *machine) clobberedRegSlotSize() int64 {
 }
 
 func (m *machine) arg0OffsetFromSP() int64 {
-	return m.spillSlotSize + m.clobberedRegSlotSize() + 16 /* 16-byte aligned return address */
+	return m.frameSize() +
+		16 + // 16-byte aligned return address
+		16 // frame size saved below the clobbered registers.
 }
 
 func (m *machine) ret0OffsetFromSP() int64 {
@@ -470,7 +505,15 @@ func (m *machine) ret0OffsetFromSP() int64 {
 
 func (m *machine) requiredStackSize() int64 {
 	return m.maxRequiredStackSizeForCalls +
-		m.clobberedRegSlotSize() +
-		m.spillSlotSize +
-		16 // 16-byte aligned return address.
+		m.frameSize() +
+		16 + // 16-byte aligned return address.
+		16 // frame size saved below the clobbered registers.
+}
+
+func (m *machine) frameSize() int64 {
+	s := m.clobberedRegSlotSize() + m.spillSlotSize
+	if s&0xf != 0 {
+		panic(fmt.Errorf("BUG: frame size %d is not 16-byte aligned", s))
+	}
+	return s
 }

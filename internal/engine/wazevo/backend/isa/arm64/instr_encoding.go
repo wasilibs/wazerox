@@ -21,7 +21,7 @@ func (m *machine) encode(root *instruction) {
 
 func (i *instruction) encode(c backend.Compiler) {
 	switch kind := i.kind; kind {
-	case nop0:
+	case nop0, emitSourceOffsetInfo:
 	case exitSequence:
 		encodeExitSequence(c, i.rn.reg())
 	case ret:
@@ -46,6 +46,11 @@ func (i *instruction) encode(c backend.Compiler) {
 		c.Emit4Bytes(encodeLoadOrStore(i.kind, regNumberInEncoding[i.rn.realReg()], i.amode))
 	case uLoad8, uLoad16, uLoad32, uLoad64, sLoad8, sLoad16, sLoad32, fpuLoad32, fpuLoad64, fpuLoad128:
 		c.Emit4Bytes(encodeLoadOrStore(i.kind, regNumberInEncoding[i.rd.realReg()], i.amode))
+	case vecLoad1R:
+		c.Emit4Bytes(encodeVecLoad1R(
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			vecArrangement(i.u1)))
 	case condBr:
 		imm19 := i.condBrOffset()
 		if imm19%4 != 0 {
@@ -81,17 +86,7 @@ func (i *instruction) encode(c backend.Compiler) {
 		to, from := i.rd.realReg(), i.rn.realReg()
 		toIsSp := to == sp
 		fromIsSp := from == sp
-		if toIsSp || fromIsSp {
-			// This is an alias of ADD (immediate):
-			// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/MOV--to-from-SP---Move-between-register-and-stack-pointer--an-alias-of-ADD--immediate--
-			c.Emit4Bytes(encodeAddSubtractImmediate(0b100, 0, 0,
-				regNumberInEncoding[from], regNumberInEncoding[to]),
-			)
-		} else {
-			// This is an alias of ORR (shifted register):
-			// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/MOV--register---Move--register---an-alias-of-ORR--shifted-register--
-			c.Emit4Bytes(encodeLogicalShiftedRegister(0b101, 0, regNumberInEncoding[from], 0, regNumberInEncoding[xzr], regNumberInEncoding[to]))
-		}
+		c.Emit4Bytes(encodeMov64(regNumberInEncoding[to], regNumberInEncoding[from], toIsSp, fromIsSp))
 	case loadP64, storeP64:
 		rt, rt2 := regNumberInEncoding[i.rn.realReg()], regNumberInEncoding[i.rm.realReg()]
 		amode := i.amode
@@ -106,9 +101,27 @@ func (i *instruction) encode(c backend.Compiler) {
 		}
 		c.Emit4Bytes(encodePreOrPostIndexLoadStorePair64(pre, kind == loadP64, rn, rt, rt2, amode.imm))
 	case loadFpuConst32:
-		encodeLoadFpuConst32(c, regNumberInEncoding[i.rd.realReg()], i.u1)
+		rd := regNumberInEncoding[i.rd.realReg()]
+		if i.u1 == 0 {
+			c.Emit4Bytes(encodeVecRRR(vecOpEOR, rd, rd, rd, vecArrangement8B))
+		} else {
+			encodeLoadFpuConst32(c, rd, i.u1)
+		}
 	case loadFpuConst64:
-		encodeLoadFpuConst64(c, regNumberInEncoding[i.rd.realReg()], i.u1)
+		rd := regNumberInEncoding[i.rd.realReg()]
+		if i.u1 == 0 {
+			c.Emit4Bytes(encodeVecRRR(vecOpEOR, rd, rd, rd, vecArrangement8B))
+		} else {
+			encodeLoadFpuConst64(c, regNumberInEncoding[i.rd.realReg()], i.u1)
+		}
+	case loadFpuConst128:
+		rd := regNumberInEncoding[i.rd.realReg()]
+		lo, hi := i.u1, i.u2
+		if lo == 0 && hi == 0 {
+			c.Emit4Bytes(encodeVecRRR(vecOpEOR, rd, rd, rd, vecArrangement16B))
+		} else {
+			encodeLoadFpuConst128(c, rd, lo, hi)
+		}
 	case aluRRRR:
 		c.Emit4Bytes(encodeAluRRRR(
 			aluOp(i.u1),
@@ -135,6 +148,16 @@ func (i *instruction) encode(c backend.Compiler) {
 			regNumberInEncoding[i.rm.realReg()],
 			i.u3 == 1,
 			rn == sp,
+		))
+	case aluRRRExtend:
+		rm, exo, to := i.rm.er()
+		c.Emit4Bytes(encodeAluRRRExtend(
+			aluOp(i.u1),
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			regNumberInEncoding[rm.RealReg()],
+			exo,
+			to,
 		))
 	case aluRRRShift:
 		r, amt, sop := i.rm.sr()
@@ -191,9 +214,15 @@ func (i *instruction) encode(c backend.Compiler) {
 	case cSet:
 		rd := regNumberInEncoding[i.rd.realReg()]
 		cf := condFlag(i.u1)
-		// https://developer.arm.com/documentation/ddi0602/2022-06/Base-Instructions/CSET--Conditional-Set--an-alias-of-CSINC-
-		// Note that we set 64bit version here.
-		c.Emit4Bytes(0b1001101010011111<<16 | uint32(cf.invert())<<12 | 0b111111<<5 | rd)
+		if i.u2 == 1 {
+			// https://developer.arm.com/documentation/ddi0602/2022-03/Base-Instructions/CSETM--Conditional-Set-Mask--an-alias-of-CSINV-
+			// Note that we set 64bit version here.
+			c.Emit4Bytes(0b1101101010011111<<16 | uint32(cf.invert())<<12 | 0b011111<<5 | rd)
+		} else {
+			// https://developer.arm.com/documentation/ddi0602/2022-06/Base-Instructions/CSET--Conditional-Set--an-alias-of-CSINC-
+			// Note that we set 64bit version here.
+			c.Emit4Bytes(0b1001101010011111<<16 | uint32(cf.invert())<<12 | 0b111111<<5 | rd)
+		}
 	case extend:
 		c.Emit4Bytes(encodeExtend(i.u3 == 1, byte(i.u1), byte(i.u2), regNumberInEncoding[i.rd.realReg()], regNumberInEncoding[i.rn.realReg()]))
 	case fpuCmp:
@@ -206,7 +235,11 @@ func (i *instruction) encode(c backend.Compiler) {
 		c.Emit4Bytes(0b1111<<25 | ftype<<22 | 1<<21 | rm<<16 | 0b1<<13 | rn<<5)
 	case udf:
 		// https://developer.arm.com/documentation/ddi0596/2020-12/Base-Instructions/UDF--Permanently-Undefined-?lang=en
-		c.Emit4Bytes(0)
+		if wazevoapi.PrintMachineCodeHexPerFunctionDisassemblable {
+			c.Emit4Bytes(dummyInstruction)
+		} else {
+			c.Emit4Bytes(0)
+		}
 	case adr:
 		c.Emit4Bytes(encodeAdr(regNumberInEncoding[i.rd.realReg()], uint32(i.u1)))
 	case cSel:
@@ -233,12 +266,45 @@ func (i *instruction) encode(c backend.Compiler) {
 			vecArrangement(byte(i.u1)),
 			vecIndex(i.u2),
 		))
-	case movFromVec:
+	case movFromVec, movFromVecSigned:
 		c.Emit4Bytes(encodeMoveFromVec(
 			regNumberInEncoding[i.rd.realReg()],
 			regNumberInEncoding[i.rn.realReg()],
 			vecArrangement(byte(i.u1)),
 			vecIndex(i.u2),
+			i.kind == movFromVecSigned,
+		))
+	case vecDup:
+		c.Emit4Bytes(encodeVecDup(
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			vecArrangement(byte(i.u1))))
+	case vecDupElement:
+		c.Emit4Bytes(encodeVecDupElement(
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			vecArrangement(byte(i.u1)),
+			vecIndex(i.u2)))
+	case vecExtract:
+		c.Emit4Bytes(encodeVecExtract(
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			regNumberInEncoding[i.rm.realReg()],
+			vecArrangement(byte(i.u1)),
+			uint32(i.u2)))
+	case vecPermute:
+		c.Emit4Bytes(encodeVecPermute(
+			vecOp(i.u1),
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			regNumberInEncoding[i.rm.realReg()],
+			vecArrangement(byte(i.u2))))
+	case vecMovElement:
+		c.Emit4Bytes(encodeVecMovElement(
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			vecArrangement(i.u1),
+			uint32(i.u2), uint32(i.u3),
 		))
 	case vecMisc:
 		c.Emit4Bytes(encodeAdvancedSIMDTwoMisc(
@@ -247,7 +313,6 @@ func (i *instruction) encode(c backend.Compiler) {
 			regNumberInEncoding[i.rn.realReg()],
 			vecArrangement(i.u2),
 		))
-
 	case vecLanes:
 		c.Emit4Bytes(encodeVecLanes(
 			vecOp(i.u1),
@@ -255,6 +320,30 @@ func (i *instruction) encode(c backend.Compiler) {
 			regNumberInEncoding[i.rn.realReg()],
 			vecArrangement(i.u2),
 		))
+	case vecShiftImm:
+		c.Emit4Bytes(encodeVecShiftImm(
+			vecOp(i.u1),
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			uint32(i.rm.shiftImm()),
+			vecArrangement(i.u2),
+		))
+	case vecTbl:
+		c.Emit4Bytes(encodeVecTbl(
+			1,
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			regNumberInEncoding[i.rm.realReg()],
+			vecArrangement(i.u2)),
+		)
+	case vecTbl2:
+		c.Emit4Bytes(encodeVecTbl(
+			2,
+			regNumberInEncoding[i.rd.realReg()],
+			regNumberInEncoding[i.rn.realReg()],
+			regNumberInEncoding[i.rm.realReg()],
+			vecArrangement(i.u2)),
+		)
 	case brTableSequence:
 		encodeBrTableSequence(c, i.rn.reg(), i.targets)
 	case fpuToInt, intToFpu:
@@ -267,6 +356,11 @@ func (i *instruction) encode(c backend.Compiler) {
 			i.u3 == 1,
 		))
 	case vecRRR:
+		if op := vecOp(i.u1); op == vecOpBsl || op == vecOpBit || op == vecOpUmlal {
+			panic(fmt.Sprintf("vecOp %s must use vecRRRRewrite instead of vecRRR", op.String()))
+		}
+		fallthrough
+	case vecRRRRewrite:
 		c.Emit4Bytes(encodeVecRRR(
 			vecOp(i.u1),
 			regNumberInEncoding[i.rd.realReg()],
@@ -295,6 +389,18 @@ func (i *instruction) encode(c backend.Compiler) {
 	}
 }
 
+func encodeMov64(rd, rn uint32, toIsSp, fromIsSp bool) uint32 {
+	if toIsSp || fromIsSp {
+		// This is an alias of ADD (immediate):
+		// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/MOV--to-from-SP---Move-between-register-and-stack-pointer--an-alias-of-ADD--immediate--
+		return encodeAddSubtractImmediate(0b100, 0, 0, rn, rd)
+	} else {
+		// This is an alias of ORR (shifted register):
+		// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/MOV--register---Move--register---an-alias-of-ORR--shifted-register--
+		return encodeLogicalShiftedRegister(0b101, 0, rn, 0, regNumberInEncoding[xzr], rd)
+	}
+}
+
 // encodeSystemRegisterMove encodes as "System register move" in
 // https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Branches--Exception-Generating-and-System-instructions?lang=en
 //
@@ -312,25 +418,295 @@ func encodeSystemRegisterMove(rt uint32, fromSystem bool) uint32 {
 func encodeVecRRR(op vecOp, rd, rn, rm uint32, arr vecArrangement) uint32 {
 	switch op {
 	case vecOpBit:
-		var q uint32
-		switch arr {
-		case vecArrangement8B:
-			q = 0b0
-		case vecArrangement16B:
-			q = 0b1
-		default:
-			panic("BUG")
+		_, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00011, 0b10 /* always has size 0b10 */, 0b1, q)
+	case vecOpBic:
+		if arr > vecArrangement16B {
+			panic("unsupported arrangement: " + arr.String())
 		}
-		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00011, 0b10, 0b1, q)
+		_, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00011, 0b01 /* always has size 0b01 */, 0b0, q)
+	case vecOpBsl:
+		if arr > vecArrangement16B {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		_, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00011, 0b01 /* always has size 0b01 */, 0b1, q)
+	case vecOpAnd:
+		if arr > vecArrangement16B {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		_, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00011, 0b00 /* always has size 0b00 */, 0b0, q)
+	case vecOpOrr:
+		_, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00011, 0b10 /* always has size 0b10 */, 0b0, q)
+	case vecOpEOR:
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00011, size, 0b1, q)
+	case vecOpCmeq:
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b10001, size, 0b1, q)
+	case vecOpCmgt:
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00110, size, 0b0, q)
+	case vecOpCmhi:
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00110, size, 0b1, q)
+	case vecOpCmge:
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00111, size, 0b0, q)
+	case vecOpCmhs:
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00111, size, 0b1, q)
+	case vecOpFcmeq:
+		var size, q uint32
+		switch arr {
+		case vecArrangement4S:
+			size, q = 0b00, 0b1
+		case vecArrangement2S:
+			size, q = 0b00, 0b0
+		case vecArrangement2D:
+			size, q = 0b01, 0b1
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b11100, size, 0b0, q)
+	case vecOpFcmgt:
+		if arr < vecArrangement2S || arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b11100, size, 0b1, q)
+	case vecOpFcmge:
+		var size, q uint32
+		switch arr {
+		case vecArrangement4S:
+			size, q = 0b00, 0b1
+		case vecArrangement2S:
+			size, q = 0b00, 0b0
+		case vecArrangement2D:
+			size, q = 0b01, 0b1
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b11100, size, 0b1, q)
+	case vecOpAdd:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b10000, size, 0b0, q)
+	case vecOpSqadd:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00001, size, 0b0, q)
+	case vecOpUqadd:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00001, size, 0b1, q)
+	case vecOpAddp:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b10111, size, 0b0, q)
+	case vecOpSqsub:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00101, size, 0b0, q)
+	case vecOpUqsub:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00101, size, 0b1, q)
+	case vecOpSub:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b10000, size, 0b1, q)
+	case vecOpFmin:
+		if arr < vecArrangement2S || arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b11110, size, 0b0, q)
+	case vecOpSmin:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b01101, size, 0b0, q)
+	case vecOpUmin:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b01101, size, 0b1, q)
+	case vecOpFmax:
+		var size, q uint32
+		switch arr {
+		case vecArrangement4S:
+			size, q = 0b00, 0b1
+		case vecArrangement2S:
+			size, q = 0b00, 0b0
+		case vecArrangement2D:
+			size, q = 0b01, 0b1
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b11110, size, 0b0, q)
+	case vecOpFadd:
+		var size, q uint32
+		switch arr {
+		case vecArrangement4S:
+			size, q = 0b00, 0b1
+		case vecArrangement2S:
+			size, q = 0b00, 0b0
+		case vecArrangement2D:
+			size, q = 0b01, 0b1
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b11010, size, 0b0, q)
+	case vecOpFsub:
+		if arr < vecArrangement2S || arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b11010, size, 0b0, q)
+	case vecOpFmul:
+		var size, q uint32
+		switch arr {
+		case vecArrangement4S:
+			size, q = 0b00, 0b1
+		case vecArrangement2S:
+			size, q = 0b00, 0b0
+		case vecArrangement2D:
+			size, q = 0b01, 0b1
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b11011, size, 0b1, q)
+	case vecOpSqrdmulh:
+		if arr < vecArrangement4H || arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b10110, size, 0b1, q)
+	case vecOpFdiv:
+		var size, q uint32
+		switch arr {
+		case vecArrangement4S:
+			size, q = 0b00, 0b1
+		case vecArrangement2S:
+			size, q = 0b00, 0b0
+		case vecArrangement2D:
+			size, q = 0b01, 0b1
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b11111, size, 0b1, q)
+	case vecOpSmax:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b01100, size, 0b0, q)
+	case vecOpUmax:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b01100, size, 0b1, q)
+	case vecOpUmaxp:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b10100, size, 0b1, q)
+	case vecOpUrhadd:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b00010, size, 0b1, q)
+	case vecOpMul:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b10011, size, 0b0, q)
+	case vecOpUmlal:
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeDifferent(rd, rn, rm, 0b1000, size, 0b1, q)
+	case vecOpSshl:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b01000, size, 0b0, q)
+	case vecOpUshl:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q := arrToSizeQEncoded(arr)
+		return encodeAdvancedSIMDThreeSame(rd, rn, rm, 0b01000, size, 0b1, q)
+
 	default:
-		panic("TODO")
+		panic("TODO: " + op.String())
 	}
+}
+
+func arrToSizeQEncoded(arr vecArrangement) (size, q uint32) {
+	switch arr {
+	case vecArrangement16B:
+		q = 0b1
+		fallthrough
+	case vecArrangement8B:
+		size = 0b00
+	case vecArrangement8H:
+		q = 0b1
+		fallthrough
+	case vecArrangement4H:
+		size = 0b01
+	case vecArrangement4S:
+		q = 0b1
+		fallthrough
+	case vecArrangement2S:
+		size = 0b10
+	case vecArrangement2D:
+		q = 0b1
+		fallthrough
+	case vecArrangement1D:
+		size = 0b11
+	default:
+		panic("BUG")
+	}
+	return
 }
 
 // encodeAdvancedSIMDThreeSame encodes as "Advanced SIMD three same" in
 // https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en
 func encodeAdvancedSIMDThreeSame(rd, rn, rm, opcode, size, U, Q uint32) uint32 {
 	return Q<<30 | U<<29 | 0b111<<25 | size<<22 | 0b1<<21 | rm<<16 | opcode<<11 | 0b1<<10 | rn<<5 | rd
+}
+
+// encodeAdvancedSIMDThreeDifferent encodes as "Advanced SIMD three different" in
+// https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en
+func encodeAdvancedSIMDThreeDifferent(rd, rn, rm, opcode, size, U, Q uint32) uint32 {
+	return Q<<30 | U<<29 | 0b111<<25 | size<<22 | 0b1<<21 | rm<<16 | opcode<<12 | rn<<5 | rd
 }
 
 // encodeFloatDataOneSource encodes as "Floating-point data-processing (1 source)" in
@@ -494,6 +870,47 @@ func encodeMoveToVec(rd, rn uint32, arr vecArrangement, index vecIndex) uint32 {
 	return 0b01001110000<<21 | imm5<<16 | 0b000111<<10 | rn<<5 | rd
 }
 
+// encodeMoveToVec encodes as "Move vector element to another vector element, mov (element)" (represented as `ins`) in
+// https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/MOV--element---Move-vector-element-to-another-vector-element--an-alias-of-INS--element--?lang=en
+// https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/INS--element---Insert-vector-element-from-another-vector-element-?lang=en
+func encodeVecMovElement(rd, rn uint32, arr vecArrangement, srcIndex, dstIndex uint32) uint32 {
+	var imm4, imm5 uint32
+	switch arr {
+	case vecArrangementB:
+		imm5 |= 0b1
+		imm5 |= srcIndex << 1
+		imm4 = dstIndex
+		if srcIndex > 0b1111 {
+			panic(fmt.Sprintf("vector index is larger than the allowed bound: %d > 15", srcIndex))
+		}
+	case vecArrangementH:
+		imm5 |= 0b10
+		imm5 |= srcIndex << 2
+		imm4 = dstIndex << 1
+		if srcIndex > 0b111 {
+			panic(fmt.Sprintf("vector index is larger than the allowed bound: %d > 7", srcIndex))
+		}
+	case vecArrangementS:
+		imm5 |= 0b100
+		imm5 |= srcIndex << 3
+		imm4 = dstIndex << 2
+		if srcIndex > 0b11 {
+			panic(fmt.Sprintf("vector index is larger than the allowed bound: %d > 3", srcIndex))
+		}
+	case vecArrangementD:
+		imm5 |= 0b1000
+		imm5 |= srcIndex << 4
+		imm4 = dstIndex << 3
+		if srcIndex > 0b1 {
+			panic(fmt.Sprintf("vector index is larger than the allowed bound: %d > 1", srcIndex))
+		}
+	default:
+		panic("Unsupported arrangement " + arr.String())
+	}
+
+	return 0b01101110000<<21 | imm5<<16 | imm4<<11 | 0b1<<10 | rn<<5 | rd
+}
+
 // encodeUnconditionalBranchReg encodes as "Unconditional branch (register)" in:
 // https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Branches--Exception-Generating-and-System-instructions?lang=en
 func encodeUnconditionalBranchReg(rn uint32, link bool) uint32 {
@@ -508,29 +925,31 @@ func encodeUnconditionalBranchReg(rn uint32, link bool) uint32 {
 // (represented as `umov` when dest is 32-bit, `umov` otherwise) in
 // https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/UMOV--Unsigned-Move-vector-element-to-general-purpose-register-?lang=en
 // https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/MOV--to-general---Move-vector-element-to-general-purpose-register--an-alias-of-UMOV-?lang=en
-func encodeMoveFromVec(rd, rn uint32, arr vecArrangement, index vecIndex) uint32 {
-	var q uint32
-	var imm5 uint32
-	switch arr {
-	case vecArrangementB:
+func encodeMoveFromVec(rd, rn uint32, arr vecArrangement, index vecIndex, signed bool) uint32 {
+	var op, imm4, q, imm5 uint32
+	switch {
+	case arr == vecArrangementB:
 		imm5 |= 0b1
 		imm5 |= uint32(index) << 1
 		if index > 0b1111 {
 			panic(fmt.Sprintf("vector index is larger than the allowed bound: %d > 15", index))
 		}
-	case vecArrangementH:
+	case arr == vecArrangementH:
 		imm5 |= 0b10
 		imm5 |= uint32(index) << 2
 		if index > 0b111 {
 			panic(fmt.Sprintf("vector index is larger than the allowed bound: %d > 7", index))
 		}
-	case vecArrangementS:
+	case arr == vecArrangementS && signed:
+		q = 0b1
+		fallthrough
+	case arr == vecArrangementS:
 		imm5 |= 0b100
 		imm5 |= uint32(index) << 3
 		if index > 0b11 {
 			panic(fmt.Sprintf("vector index is larger than the allowed bound: %d > 3", index))
 		}
-	case vecArrangementD:
+	case arr == vecArrangementD && !signed:
 		imm5 |= 0b1000
 		imm5 |= uint32(index) << 4
 		q = 0b1
@@ -540,7 +959,98 @@ func encodeMoveFromVec(rd, rn uint32, arr vecArrangement, index vecIndex) uint32
 	default:
 		panic("Unsupported arrangement " + arr.String())
 	}
-	return 0b0_001110000<<21 | q<<30 | imm5<<16 | 0b001111<<10 | rn<<5 | rd
+	if signed {
+		op, imm4 = 0, 0b0101
+	} else {
+		op, imm4 = 0, 0b0111
+	}
+	return op<<29 | 0b01110000<<21 | q<<30 | imm5<<16 | imm4<<11 | 1<<10 | rn<<5 | rd
+}
+
+// encodeVecDup encodes as "Duplicate general-purpose register to vector" DUP (general)
+// (represented as `dup`)
+// https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/DUP--general---Duplicate-general-purpose-register-to-vector-?lang=en
+func encodeVecDup(rd, rn uint32, arr vecArrangement) uint32 {
+	var q, imm5 uint32
+	switch arr {
+	case vecArrangement8B:
+		q, imm5 = 0b0, 0b1
+	case vecArrangement16B:
+		q, imm5 = 0b1, 0b1
+	case vecArrangement4H:
+		q, imm5 = 0b0, 0b10
+	case vecArrangement8H:
+		q, imm5 = 0b1, 0b10
+	case vecArrangement2S:
+		q, imm5 = 0b0, 0b100
+	case vecArrangement4S:
+		q, imm5 = 0b1, 0b100
+	case vecArrangement2D:
+		q, imm5 = 0b1, 0b1000
+	default:
+		panic("Unsupported arrangement " + arr.String())
+	}
+	return q<<30 | 0b001110000<<21 | imm5<<16 | 0b000011<<10 | rn<<5 | rd
+}
+
+// encodeVecDup encodes as "Duplicate vector element to vector or scalar" DUP (element).
+// (represented as `dup`)
+// https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/DUP--element---Duplicate-vector-element-to-vector-or-scalar-
+func encodeVecDupElement(rd, rn uint32, arr vecArrangement, srcIndex vecIndex) uint32 {
+	var q, imm5 uint32
+	q = 0b1
+	switch arr {
+	case vecArrangementB:
+		imm5 |= 0b1
+		imm5 |= uint32(srcIndex) << 1
+	case vecArrangementH:
+		imm5 |= 0b10
+		imm5 |= uint32(srcIndex) << 2
+	case vecArrangementS:
+		imm5 |= 0b100
+		imm5 |= uint32(srcIndex) << 3
+	case vecArrangementD:
+		imm5 |= 0b1000
+		imm5 |= uint32(srcIndex) << 4
+	default:
+		panic("unsupported arrangement" + arr.String())
+	}
+
+	return q<<30 | 0b001110000<<21 | imm5<<16 | 0b1<<10 | rn<<5 | rd
+}
+
+// encodeVecExtract encodes as "Advanced SIMD extract."
+// Currently only `ext` is defined.
+// https://developer.arm.com/documentation/ddi0602/2023-06/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en#simd-dp
+// https://developer.arm.com/documentation/ddi0602/2023-06/SIMD-FP-Instructions/EXT--Extract-vector-from-pair-of-vectors-?lang=en
+func encodeVecExtract(rd, rn, rm uint32, arr vecArrangement, index uint32) uint32 {
+	var q, imm4 uint32
+	switch arr {
+	case vecArrangement8B:
+		q, imm4 = 0, 0b0111&uint32(index)
+	case vecArrangement16B:
+		q, imm4 = 1, 0b1111&uint32(index)
+	default:
+		panic("Unsupported arrangement " + arr.String())
+	}
+	return q<<30 | 0b101110000<<21 | rm<<16 | imm4<<11 | rn<<5 | rd
+}
+
+// encodeVecPermute encodes as "Advanced SIMD permute."
+// https://developer.arm.com/documentation/ddi0602/2023-06/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en#simd-dp
+func encodeVecPermute(op vecOp, rd, rn, rm uint32, arr vecArrangement) uint32 {
+	var q, size, opcode uint32
+	switch op {
+	case vecOpZip1:
+		opcode = 0b011
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q = arrToSizeQEncoded(arr)
+	default:
+		panic("TODO: " + op.String())
+	}
+	return q<<30 | 0b001110<<24 | size<<22 | rm<<16 | opcode<<12 | 0b10<<10 | rn<<5 | rd
 }
 
 // encodeConditionalSelect encodes as "Conditional select" in
@@ -580,7 +1090,7 @@ func encodeLoadFpuConst32(c backend.Compiler, rd uint32, rawF32 uint64) {
 
 // encodeLoadFpuConst64 encodes the following three instructions:
 //
-//	ldr x8, #8  ;; literal load of data.f64
+//	ldr d8, #8  ;; literal load of data.f64
 //	b 12           ;; skip the data
 //	data.f64 xxxxxxx
 func encodeLoadFpuConst64(c backend.Compiler, rd uint32, rawF64 uint64) {
@@ -597,6 +1107,32 @@ func encodeLoadFpuConst64(c backend.Compiler, rd uint32, rawF64 uint64) {
 		// data.f64 xxxxxxx
 		c.Emit4Bytes(uint32(rawF64))
 		c.Emit4Bytes(uint32(rawF64 >> 32))
+	}
+}
+
+// encodeLoadFpuConst128 encodes the following three instructions:
+//
+//	ldr v8, #8  ;; literal load of data.f64
+//	b 20           ;; skip the data
+//	data.v128 xxxxxxx
+func encodeLoadFpuConst128(c backend.Compiler, rd uint32, lo, hi uint64) {
+	c.Emit4Bytes(
+		// https://developer.arm.com/documentation/ddi0596/2020-12/SIMD-FP-Instructions/LDR--literal--SIMD-FP---Load-SIMD-FP-Register--PC-relative-literal--?lang=en
+		0b1<<31 | 0b111<<26 | (0x8/4)<<5 | rd,
+	)
+	c.Emit4Bytes(encodeUnconditionalBranch(false, 20)) // b 20
+	if wazevoapi.PrintMachineCodeHexPerFunctionDisassemblable {
+		// Inlined data.v128 cannot be disassembled, so we add dummy instructions here.
+		c.Emit4Bytes(dummyInstruction)
+		c.Emit4Bytes(dummyInstruction)
+		c.Emit4Bytes(dummyInstruction)
+		c.Emit4Bytes(dummyInstruction)
+	} else {
+		// data.v128 xxxxxxx
+		c.Emit4Bytes(uint32(lo))
+		c.Emit4Bytes(uint32(lo >> 32))
+		c.Emit4Bytes(uint32(hi))
+		c.Emit4Bytes(uint32(hi >> 32))
 	}
 }
 
@@ -777,6 +1313,13 @@ func encodeLoadOrStore(kind instructionKind, rt uint32, amode addressMode) uint3
 	default:
 		panic("BUG")
 	}
+}
+
+// encodeVecLoad1R encodes as Load one single-element structure and Replicate to all lanes (of one register) in
+// https://developer.arm.com/documentation/ddi0596/2021-12/SIMD-FP-Instructions/LD1R--Load-one-single-element-structure-and-Replicate-to-all-lanes--of-one-register--?lang=en#sa_imm
+func encodeVecLoad1R(rt, rn uint32, arr vecArrangement) uint32 {
+	size, q := arrToSizeQEncoded(arr)
+	return q<<30 | 0b001101010000001100<<12 | size<<10 | rn<<5 | rt
 }
 
 // encodeAluBitmaskImmediate encodes as Logical (immediate) in
@@ -986,6 +1529,48 @@ func encodeAluRRRShift(op aluOp, rd, rn, rm, amount uint32, shiftOp shiftOp, _64
 	return opc<<29 | n<<21 | _31to24<<24 | shift<<22 | rm<<16 | (amount << 10) | (rn << 5) | rd
 }
 
+// "Add/subtract (extended register)" in
+// https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Register?lang=en#addsub_ext
+func encodeAluRRRExtend(ao aluOp, rd, rn, rm uint32, extOp extendOp, to byte) uint32 {
+	var s, op uint32
+	switch ao {
+	case aluOpAdd:
+		op = 0b0
+	case aluOpAddS:
+		op, s = 0b0, 0b1
+	case aluOpSub:
+		op = 0b1
+	case aluOpSubS:
+		op, s = 0b1, 0b1
+	default:
+		panic("BUG: extended register operand can be used only for add/sub")
+	}
+
+	var sf uint32
+	if to == 64 {
+		sf = 0b1
+	}
+
+	var option uint32
+	switch extOp {
+	case extendOpUXTB:
+		option = 0b000
+	case extendOpUXTH:
+		option = 0b001
+	case extendOpUXTW:
+		option = 0b010
+	case extendOpSXTB:
+		option = 0b100
+	case extendOpSXTH:
+		option = 0b101
+	case extendOpSXTW:
+		option = 0b110
+	case extendOpSXTX, extendOpUXTX:
+		panic(fmt.Sprintf("%s is essentially noop, and should be handled much earlier than encoding", extOp.String()))
+	}
+	return sf<<31 | op<<30 | s<<29 | 0b1011001<<21 | rm<<16 | option<<13 | rn<<5 | rd
+}
+
 // encodeAluRRR encodes as Data Processing (register), depending on aluOp.
 // https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Register?lang=en
 func encodeAluRRR(op aluOp, rd, rn, rm uint32, _64bit, isRnSp bool) uint32 {
@@ -1166,12 +1751,22 @@ func encodeAluRRImm(op aluOp, rd, rn, amount, _64bit uint32) uint32 {
 		// LSL (immediate) is an alias for UBFM.
 		// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/UBFM--Unsigned-Bitfield-Move-?lang=en
 		opc = 0b10
-		if _64bit == 1 {
-			immr = 64 - amount
+		if amount == 0 {
+			// This can be encoded as NOP, but we don't do it for consistency: lsr xn, xm, #0
+			immr = 0
+			if _64bit == 1 {
+				imms = 0b111111
+			} else {
+				imms = 0b11111
+			}
 		} else {
-			immr = 32 - amount
+			if _64bit == 1 {
+				immr = 64 - amount
+			} else {
+				immr = (32 - amount) & 0b11111
+			}
+			imms = immr - 1
 		}
-		imms = immr - 1
 	case aluOpLsr:
 		// LSR (immediate) is an alias for UBFM.
 		// https://developer.arm.com/documentation/ddi0596/2021-12/Base-Instructions/LSR--immediate---Logical-Shift-Right--immediate---an-alias-of-UBFM-?lang=en
@@ -1192,27 +1787,106 @@ func encodeAluRRImm(op aluOp, rd, rn, amount, _64bit uint32) uint32 {
 // https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en
 func encodeVecLanes(op vecOp, rd uint32, rn uint32, arr vecArrangement) uint32 {
 	var u, q, size, opcode uint32
+	switch arr {
+	case vecArrangement8B:
+		q, size = 0b0, 0b00
+	case vecArrangement16B:
+		q, size = 0b1, 0b00
+	case vecArrangement4H:
+		q, size = 0, 0b01
+	case vecArrangement8H:
+		q, size = 1, 0b01
+	case vecArrangement4S:
+		q, size = 1, 0b10
+	default:
+		panic("unsupported arrangement: " + arr.String())
+	}
 	switch op {
 	case vecOpUaddlv:
 		u, opcode = 1, 0b00011
-		switch arr {
-		case vecArrangement8B:
-			q, size = 0b0, 0b00
-		case vecArrangement16B:
-			q, size = 0b1, 0b00
-		case vecArrangement4H:
-			q, size = 0, 0b01
-		case vecArrangement8H:
-			q, size = 1, 0b01
-		case vecArrangement4S:
-			q, size = 1, 0b10
-		default:
-			panic("unsupported arrangement: " + arr.String())
-		}
+	case vecOpUminv:
+		u, opcode = 1, 0b11010
+	case vecOpAddv:
+		u, opcode = 0, 0b11011
 	default:
 		panic("unsupported or illegal vecOp: " + op.String())
 	}
 	return q<<30 | u<<29 | 0b1110<<24 | size<<22 | 0b11000<<17 | opcode<<12 | 0b10<<10 | rn<<5 | rd
+}
+
+// encodeVecLanes encodes as Data Processing (Advanced SIMD scalar shift by immediate) depending on vecOp in
+// https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en
+func encodeVecShiftImm(op vecOp, rd uint32, rn, amount uint32, arr vecArrangement) uint32 {
+	var u, q, immh, immb, opcode uint32
+	switch op {
+	case vecOpSshll:
+		u, opcode = 0b0, 0b10100
+	case vecOpUshll:
+		u, opcode = 0b1, 0b10100
+	case vecOpSshr:
+		u, opcode = 0, 0b00000
+	default:
+		panic("unsupported or illegal vecOp: " + op.String())
+	}
+	switch arr {
+	case vecArrangement16B:
+		q = 0b1
+		fallthrough
+	case vecArrangement8B:
+		immh = 0b0001
+		immb = 8 - uint32(amount&0b111)
+	case vecArrangement8H:
+		q = 0b1
+		fallthrough
+	case vecArrangement4H:
+		v := 16 - uint32(amount&0b1111)
+		immb = v & 0b111
+		immh = 0b0010 | (v >> 3)
+	case vecArrangement4S:
+		q = 0b1
+		fallthrough
+	case vecArrangement2S:
+		v := 32 - uint32(amount&0b11111)
+		immb = v & 0b111
+		immh = 0b0100 | (v >> 3)
+	case vecArrangement2D:
+		q = 0b1
+		v := 64 - uint32(amount&0b111111)
+		immb = v & 0b111
+		immh = 0b1000 | (v >> 3)
+	default:
+		panic("unsupported arrangement: " + arr.String())
+	}
+	return q<<30 | u<<29 | 0b011110<<23 | immh<<19 | immb<<16 | 0b000001<<10 | opcode<<11 | 0b1<<10 | rn<<5 | rd
+}
+
+// encodeVecTbl encodes as Data Processing (Advanced SIMD table lookup) in
+// https://developer.arm.com/documentation/ddi0596/2020-12/Index-by-Encoding/Data-Processing----Scalar-Floating-Point-and-Advanced-SIMD?lang=en#simd-dp
+//
+// Note: tblOp may encode tbl1, tbl2... in the future. Currently, it is ignored.
+func encodeVecTbl(nregs, rd, rn, rm uint32, arr vecArrangement) uint32 {
+	var q, op2, len, op uint32
+
+	switch nregs {
+	case 1:
+		// tbl: single-register
+		len = 0b00
+	case 2:
+		// tbl2: 2-register table
+		len = 0b01
+	default:
+		panic(fmt.Sprintf("unsupported number or registers %d", nregs))
+	}
+	switch arr {
+	case vecArrangement8B:
+		q = 0b0
+	case vecArrangement16B:
+		q = 0b1
+	default:
+		panic("unsupported arrangement: " + arr.String())
+	}
+
+	return q<<30 | 0b001110<<24 | op2<<22 | rm<<16 | len<<13 | op<<12 | rn<<5 | rd
 }
 
 // encodeVecMisc encodes as Data Processing (Advanced SIMD two-register miscellaneous) depending on vecOp in
@@ -1227,6 +1901,216 @@ func encodeAdvancedSIMDTwoMisc(op vecOp, rd, rn uint32, arr vecArrangement) uint
 			q, size = 0b0, 0b00
 		case vecArrangement16B:
 			q, size = 0b1, 0b00
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpCmeq0:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		opcode = 0b01001
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpNot:
+		u = 1
+		opcode = 0b00101
+		switch arr {
+		case vecArrangement8B:
+			q, size = 0b0, 0b00
+		case vecArrangement16B:
+			q, size = 0b1, 0b00
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpAbs:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		opcode = 0b01011
+		u = 0b0
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpNeg:
+		if arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		opcode = 0b01011
+		u = 0b1
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpFabs:
+		if arr < vecArrangement2S || arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		opcode = 0b01111
+		u = 0b0
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpFneg:
+		if arr < vecArrangement2S || arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		opcode = 0b01111
+		u = 0b1
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpFrintm:
+		u = 0b0
+		opcode = 0b11001
+		switch arr {
+		case vecArrangement2S:
+			q, size = 0b0, 0b00
+		case vecArrangement4S:
+			q, size = 0b1, 0b00
+		case vecArrangement2D:
+			q, size = 0b1, 0b01
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpFrintn:
+		u = 0b0
+		opcode = 0b11000
+		switch arr {
+		case vecArrangement2S:
+			q, size = 0b0, 0b00
+		case vecArrangement4S:
+			q, size = 0b1, 0b00
+		case vecArrangement2D:
+			q, size = 0b1, 0b01
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpFrintp:
+		u = 0b0
+		opcode = 0b11000
+		if arr < vecArrangement2S || arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpFrintz:
+		u = 0b0
+		opcode = 0b11001
+		if arr < vecArrangement2S || arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpFsqrt:
+		if arr < vecArrangement2S || arr == vecArrangement1D {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		opcode = 0b11111
+		u = 0b1
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpFcvtl:
+		opcode = 0b10111
+		u = 0b0
+		switch arr {
+		case vecArrangement2S:
+			size, q = 0b01, 0b0
+		case vecArrangement4H:
+			size, q = 0b00, 0b0
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpFcvtn:
+		opcode = 0b10110
+		u = 0b0
+		switch arr {
+		case vecArrangement2S:
+			size, q = 0b01, 0b0
+		case vecArrangement4H:
+			size, q = 0b00, 0b0
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpFcvtzs:
+		opcode = 0b11011
+		u = 0b0
+		switch arr {
+		case vecArrangement2S:
+			q, size = 0b0, 0b10
+		case vecArrangement4S:
+			q, size = 0b1, 0b10
+		case vecArrangement2D:
+			q, size = 0b1, 0b11
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpFcvtzu:
+		opcode = 0b11011
+		u = 0b1
+		switch arr {
+		case vecArrangement2S:
+			q, size = 0b0, 0b10
+		case vecArrangement4S:
+			q, size = 0b1, 0b10
+		case vecArrangement2D:
+			q, size = 0b1, 0b11
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpScvtf:
+		opcode = 0b11101
+		u = 0b0
+		switch arr {
+		case vecArrangement4S:
+			q, size = 0b1, 0b00
+		case vecArrangement2S:
+			q, size = 0b0, 0b00
+		case vecArrangement2D:
+			q, size = 0b1, 0b01
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpUcvtf:
+		opcode = 0b11101
+		u = 0b1
+		switch arr {
+		case vecArrangement4S:
+			q, size = 0b1, 0b00
+		case vecArrangement2S:
+			q, size = 0b0, 0b00
+		case vecArrangement2D:
+			q, size = 0b1, 0b01
+		default:
+			panic("unsupported arrangement: " + arr.String())
+		}
+	case vecOpSqxtn:
+		// When q == 1 it encodes sqxtn2 (operates on upper 64 bits).
+		opcode = 0b10100
+		u = 0b0
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpUqxtn:
+		// When q == 1 it encodes uqxtn2 (operates on upper 64 bits).
+		opcode = 0b10100
+		u = 0b1
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpSqxtun:
+		// When q == 1 it encodes sqxtun2 (operates on upper 64 bits).
+		opcode = 0b10010 // 0b10100
+		u = 0b1
+		if arr > vecArrangement4S {
+			panic("unsupported arrangement: " + arr.String())
+		}
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpRev64:
+		opcode = 0b00000
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpXtn:
+		u = 0b0
+		opcode = 0b10010
+		size, q = arrToSizeQEncoded(arr)
+	case vecOpShll:
+		u = 0b1
+		opcode = 0b10011
+		switch arr {
+		case vecArrangement8B:
+			q, size = 0b0, 0b00
+		case vecArrangement4H:
+			q, size = 0b0, 0b01
+		case vecArrangement2S:
+			q, size = 0b0, 0b10
 		default:
 			panic("unsupported arrangement: " + arr.String())
 		}
@@ -1269,11 +2153,29 @@ func encodeBrTableSequence(c backend.Compiler, index regalloc.VReg, targets []ui
 // encodeExitSequence matches the implementation detail of abiImpl.emitGoEntryPreamble.
 func encodeExitSequence(c backend.Compiler, ctxReg regalloc.VReg) {
 	// Restore the FP, SP and LR, and return to the Go code:
-	// 		ldr fp, [savedExecutionContextPtr, #OriginalFramePointer]
-	// 		ldr tmp, [savedExecutionContextPtr, #OriginalStackPointer]
+	// 		ldr lr,  [ctxReg, #GoReturnAddress]
+	// 		ldr fp,  [ctxReg, #OriginalFramePointer]
+	// 		ldr tmp, [ctxReg, #OriginalStackPointer]
 	//      mov sp, tmp ;; sp cannot be str'ed directly.
-	// 		ldr lr, [savedExecutionContextPtr, #GoReturnAddress]
 	// 		ret ;; --> return to the Go code
+
+	var ctxEvicted bool
+	if ctx := ctxReg.RealReg(); ctx == fp || ctx == lr {
+		// In order to avoid overwriting the context register, we move ctxReg to tmp.
+		c.Emit4Bytes(encodeMov64(regNumberInEncoding[tmp], regNumberInEncoding[ctx], false, false))
+		ctxReg = tmpRegVReg
+		ctxEvicted = true
+	}
+
+	restoreLr := encodeLoadOrStore(
+		uLoad64,
+		regNumberInEncoding[lr],
+		addressMode{
+			kind: addressModeKindRegUnsignedImm12,
+			rn:   ctxReg,
+			imm:  wazevoapi.ExecutionContextOffsetGoReturnAddress.I64(),
+		},
+	)
 
 	restoreFp := encodeLoadOrStore(
 		uLoad64,
@@ -1281,7 +2183,7 @@ func encodeExitSequence(c backend.Compiler, ctxReg regalloc.VReg) {
 		addressMode{
 			kind: addressModeKindRegUnsignedImm12,
 			rn:   ctxReg,
-			imm:  wazevoapi.ExecutionContextOffsets.OriginalFramePointer.I64(),
+			imm:  wazevoapi.ExecutionContextOffsetOriginalFramePointer.I64(),
 		},
 	)
 
@@ -1291,28 +2193,23 @@ func encodeExitSequence(c backend.Compiler, ctxReg regalloc.VReg) {
 		addressMode{
 			kind: addressModeKindRegUnsignedImm12,
 			rn:   ctxReg,
-			imm:  wazevoapi.ExecutionContextOffsets.OriginalStackPointer.I64(),
+			imm:  wazevoapi.ExecutionContextOffsetOriginalStackPointer.I64(),
 		},
 	)
 
 	movTmpToSp := encodeAddSubtractImmediate(0b100, 0, 0,
 		regNumberInEncoding[tmp], regNumberInEncoding[sp])
 
-	restoreLr := encodeLoadOrStore(
-		uLoad64,
-		regNumberInEncoding[lr],
-		addressMode{
-			kind: addressModeKindRegUnsignedImm12,
-			rn:   ctxReg,
-			imm:  wazevoapi.ExecutionContextOffsets.GoReturnAddress.I64(),
-		},
-	)
-
 	c.Emit4Bytes(restoreFp)
+	c.Emit4Bytes(restoreLr)
 	c.Emit4Bytes(restoreSpToTmp)
 	c.Emit4Bytes(movTmpToSp)
-	c.Emit4Bytes(restoreLr)
 	c.Emit4Bytes(encodeRet())
+	if !ctxEvicted {
+		// In order to have the fixed-length exit sequence, we need to padd the binary.
+		// Since this will never be reached, we insert a dummy instruction.
+		c.Emit4Bytes(dummyInstruction)
+	}
 }
 
 func encodeRet() uint32 {

@@ -10,7 +10,7 @@ func (m *machine) lowerConstant(instr *ssa.Instruction) (vr regalloc.VReg) {
 	val := instr.Return()
 	valType := val.Type()
 
-	vr = m.compiler.AllocateVReg(regalloc.RegTypeOf(valType))
+	vr = m.compiler.AllocateVReg(valType)
 	m.InsertLoadConstant(instr, vr)
 	return
 }
@@ -36,13 +36,13 @@ func (m *machine) InsertLoadConstant(instr *ssa.Instruction, vr regalloc.VReg) {
 		m.insert(loadF)
 	case ssa.TypeI32:
 		if v == 0 {
-			m.InsertMove(vr, xzrVReg)
+			m.InsertMove(vr, xzrVReg, ssa.TypeI32)
 		} else {
 			m.lowerConstantI32(vr, int32(v))
 		}
 	case ssa.TypeI64:
 		if v == 0 {
-			m.InsertMove(vr, xzrVReg)
+			m.InsertMove(vr, xzrVReg, ssa.TypeI64)
 		} else {
 			m.lowerConstantI64(vr, int64(v))
 		}
@@ -109,7 +109,7 @@ func (m *machine) lowerConstantI64(dst regalloc.VReg, c int64) {
 
 func (m *machine) lowerConstViaBitMaskImmediate(c uint64, dst regalloc.VReg, b64 bool) {
 	instr := m.allocateInstr()
-	instr.asALUBitmaskImm(aluOpOrr, xzrVReg, dst, c, b64)
+	instr.asALUBitmaskImm(aluOpOrr, dst, xzrVReg, c, b64)
 	m.insert(instr)
 }
 

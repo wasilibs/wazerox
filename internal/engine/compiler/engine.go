@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/tetratelabs/wazero/api"
@@ -349,7 +350,6 @@ const (
 	callEngineModuleContextModuleInstanceOffset                  = 8
 	callEngineModuleContextGlobalElement0AddressOffset           = 16
 	callEngineModuleContextMemoryElement0AddressOffset           = 24
-	callEngineModuleContextMemorySliceLenOffset                  = 32
 	callEngineModuleContextMemoryInstanceOffset                  = 40
 	callEngineModuleContextTablesElement0AddressOffset           = 48
 	callEngineModuleContextFunctionsElement0AddressOffset        = 56
@@ -404,7 +404,7 @@ const (
 	dataInstanceStructSize = 24
 
 	// Consts for wasm.ElementInstance.
-	elementInstanceStructSize = 32
+	elementInstanceStructSize = 24
 
 	// pointerSizeLog2 satisfies: 1 << pointerSizeLog2 = sizeOf(uintptr)
 	pointerSizeLog2 = 3
@@ -437,6 +437,7 @@ const (
 	nativeCallStatusCodeTypeMismatchOnIndirectCall
 	nativeCallStatusIntegerOverflow
 	nativeCallStatusIntegerDivisionByZero
+	nativeCallStatusUnalignedAtomic
 	nativeCallStatusModuleClosed
 )
 
@@ -458,6 +459,8 @@ func (s nativeCallStatusCode) causePanic() {
 		err = wasmruntime.ErrRuntimeInvalidTableAccess
 	case nativeCallStatusCodeTypeMismatchOnIndirectCall:
 		err = wasmruntime.ErrRuntimeIndirectCallTypeMismatch
+	case nativeCallStatusUnalignedAtomic:
+		err = wasmruntime.ErrRuntimeUnalignedAtomic
 	}
 	panic(err)
 }
@@ -486,6 +489,8 @@ func (s nativeCallStatusCode) String() (ret string) {
 		ret = "integer division by zero"
 	case nativeCallStatusModuleClosed:
 		ret = "module closed"
+	case nativeCallStatusUnalignedAtomic:
+		ret = "unaligned atomic"
 	default:
 		panic("BUG")
 	}
@@ -773,6 +778,10 @@ func (ce *callEngine) call(ctx context.Context, params, results []uint64) (_ []u
 		defer done()
 	}
 
+	if ctx.Value(experimental.EnableSnapshotterKey{}) != nil {
+		ctx = context.WithValue(ctx, experimental.SnapshotterKey{}, ce)
+	}
+
 	ce.execWasmFunction(ctx, m)
 
 	// This returns a safe copy of the results, instead of a slice view. If we
@@ -1020,6 +1029,9 @@ const (
 	builtinFunctionIndexCheckExitCode
 	// builtinFunctionIndexBreakPoint is internal (only for wazero developers). Disabled by default.
 	builtinFunctionIndexBreakPoint
+	builtinFunctionMemoryWait32
+	builtinFunctionMemoryWait64
+	builtinFunctionMemoryNotify
 )
 
 func (ce *callEngine) execWasmFunction(ctx context.Context, m *wasm.ModuleInstance) {
@@ -1048,12 +1060,27 @@ entry:
 			stack := ce.stack[base : base+stackLen]
 
 			fn := calleeHostFunction.parent.goFunc
-			switch fn := fn.(type) {
-			case api.GoModuleFunction:
-				fn.Call(ctx, ce.callerModuleInstance, stack)
-			case api.GoFunction:
-				fn.Call(ctx, stack)
-			}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						if s, ok := r.(*snapshot); ok {
+							if s.ce == ce {
+								s.doRestore()
+							} else {
+								panic(r)
+							}
+						} else {
+							panic(r)
+						}
+					}
+				}()
+				switch fn := fn.(type) {
+				case api.GoModuleFunction:
+					fn.Call(ctx, ce.callerModuleInstance, stack)
+				case api.GoFunction:
+					fn.Call(ctx, stack)
+				}
+			}()
 
 			codeAddr, modAddr = ce.returnAddress, ce.moduleInstance
 			goto entry
@@ -1066,6 +1093,12 @@ entry:
 				ce.builtinFunctionGrowStack(caller.parent.stackPointerCeil)
 			case builtinFunctionIndexTableGrow:
 				ce.builtinFunctionTableGrow(caller.moduleInstance.Tables)
+			case builtinFunctionMemoryWait32:
+				ce.builtinFunctionMemoryWait32(caller.moduleInstance.MemoryInstance)
+			case builtinFunctionMemoryWait64:
+				ce.builtinFunctionMemoryWait64(caller.moduleInstance.MemoryInstance)
+			case builtinFunctionMemoryNotify:
+				ce.builtinFunctionMemoryNotify(caller.moduleInstance.MemoryInstance)
 			case builtinFunctionIndexFunctionListenerBefore:
 				ce.builtinFunctionFunctionListenerBefore(ctx, m, caller)
 			case builtinFunctionIndexFunctionListenerAfter:
@@ -1128,8 +1161,8 @@ func (ce *callEngine) builtinFunctionMemoryGrow(mem *wasm.MemoryInstance) {
 
 	// Update the moduleContext fields as they become stale after the update ^^.
 	bufSliceHeader := (*reflect.SliceHeader)(unsafe.Pointer(&mem.Buffer))
-	ce.moduleContext.memorySliceLen = uint64(bufSliceHeader.Len)
-	ce.moduleContext.memoryElement0Address = bufSliceHeader.Data
+	atomic.StoreUint64(&ce.moduleContext.memorySliceLen, uint64(bufSliceHeader.Len))
+	atomic.StoreUintptr(&ce.moduleContext.memoryElement0Address, bufSliceHeader.Data)
 }
 
 func (ce *callEngine) builtinFunctionTableGrow(tables []*wasm.TableInstance) {
@@ -1139,6 +1172,92 @@ func (ce *callEngine) builtinFunctionTableGrow(tables []*wasm.TableInstance) {
 	ref := ce.popValue()
 	res := table.Grow(uint32(num), uintptr(ref))
 	ce.pushValue(uint64(res))
+}
+
+func (ce *callEngine) builtinFunctionMemoryWait32(mem *wasm.MemoryInstance) {
+	if !mem.Shared {
+		panic(wasmruntime.ErrRuntimeExpectedSharedMemory)
+	}
+
+	timeout := int64(ce.popValue())
+	exp := uint32(ce.popValue())
+	addr := uintptr(ce.popValue())
+	base := uintptr(unsafe.Pointer(&mem.Buffer[0]))
+
+	offset := uint32(addr - base)
+
+	ce.pushValue(mem.Wait32(offset, exp, timeout))
+}
+
+func (ce *callEngine) builtinFunctionMemoryWait64(mem *wasm.MemoryInstance) {
+	if !mem.Shared {
+		panic(wasmruntime.ErrRuntimeExpectedSharedMemory)
+	}
+
+	timeout := int64(ce.popValue())
+	exp := ce.popValue()
+	addr := uintptr(ce.popValue())
+	base := uintptr(unsafe.Pointer(&mem.Buffer[0]))
+
+	offset := uint32(addr - base)
+
+	ce.pushValue(mem.Wait64(offset, exp, timeout))
+}
+
+func (ce *callEngine) builtinFunctionMemoryNotify(mem *wasm.MemoryInstance) {
+	count := ce.popValue()
+	addr := ce.popValue()
+
+	offset := uint32(uintptr(addr) - uintptr(unsafe.Pointer(&mem.Buffer[0])))
+
+	ce.pushValue(uint64(mem.Notify(offset, uint32(count))))
+}
+
+// snapshot implements experimental.Snapshot
+type snapshot struct {
+	stackPointer            uint64
+	stackBasePointerInBytes uint64
+	returnAddress           uint64
+	hostBase                int
+	stack                   []uint64
+
+	ret []uint64
+
+	ce *callEngine
+}
+
+// Snapshot implements the same method as documented on experimental.Snapshotter.
+func (ce *callEngine) Snapshot() experimental.Snapshot {
+	hostBase := int(ce.stackBasePointerInBytes >> 3)
+
+	stackTop := int(ce.stackTopIndex())
+	stack := make([]uint64, stackTop)
+	copy(stack, ce.stack[:stackTop])
+
+	return &snapshot{
+		stackPointer:            ce.stackContext.stackPointer,
+		stackBasePointerInBytes: ce.stackBasePointerInBytes,
+		returnAddress:           uint64(ce.returnAddress),
+		hostBase:                hostBase,
+		stack:                   stack,
+		ce:                      ce,
+	}
+}
+
+// Restore implements the same method as documented on experimental.Snapshot.
+func (s *snapshot) Restore(ret []uint64) {
+	s.ret = ret
+	panic(s)
+}
+
+// Restore implements the same method as documented on experimental.Snapshot.
+func (s *snapshot) doRestore() {
+	ce := s.ce
+	ce.stackContext.stackPointer = s.stackPointer
+	ce.stackContext.stackBasePointerInBytes = s.stackBasePointerInBytes
+	copy(ce.stack, s.stack)
+	ce.returnAddress = uintptr(s.returnAddress)
+	copy(ce.stack[s.hostBase:], s.ret)
 }
 
 // stackIterator implements experimental.StackIterator.
@@ -1193,11 +1312,6 @@ func (si *stackIterator) ProgramCounter() experimental.ProgramCounter {
 // Function implements the same method as documented on experimental.StackIterator.
 func (si *stackIterator) Function() experimental.InternalFunction {
 	return internalFunction{si.fn}
-}
-
-// Parameters implements the same method as documented on experimental.StackIterator.
-func (si *stackIterator) Parameters() []uint64 {
-	return si.stack[si.base : si.base+si.fn.funcType.ParamNumInUint64]
 }
 
 // internalFunction implements experimental.InternalFunction.
@@ -1564,6 +1678,36 @@ func compileWasmFunction(buf asm.Buffer, cmp compiler, ir *wazeroir.CompilationR
 			err = cmp.compileV128ITruncSatFromF(op)
 		case wazeroir.OperationKindBuiltinFunctionCheckExitCode:
 			err = cmp.compileBuiltinFunctionCheckExitCode()
+		case wazeroir.OperationKindAtomicLoad:
+			err = cmp.compileAtomicLoad(op)
+		case wazeroir.OperationKindAtomicLoad8:
+			err = cmp.compileAtomicLoad8(op)
+		case wazeroir.OperationKindAtomicLoad16:
+			err = cmp.compileAtomicLoad16(op)
+		case wazeroir.OperationKindAtomicStore:
+			err = cmp.compileAtomicStore(op)
+		case wazeroir.OperationKindAtomicStore8:
+			err = cmp.compileAtomicStore8(op)
+		case wazeroir.OperationKindAtomicStore16:
+			err = cmp.compileAtomicStore16(op)
+		case wazeroir.OperationKindAtomicRMW:
+			err = cmp.compileAtomicRMW(op)
+		case wazeroir.OperationKindAtomicRMW8:
+			err = cmp.compileAtomicRMW8(op)
+		case wazeroir.OperationKindAtomicRMW16:
+			err = cmp.compileAtomicRMW16(op)
+		case wazeroir.OperationKindAtomicRMWCmpxchg:
+			err = cmp.compileAtomicRMWCmpxchg(op)
+		case wazeroir.OperationKindAtomicRMW8Cmpxchg:
+			err = cmp.compileAtomicRMW8Cmpxchg(op)
+		case wazeroir.OperationKindAtomicRMW16Cmpxchg:
+			err = cmp.compileAtomicRMW16Cmpxchg(op)
+		case wazeroir.OperationKindAtomicMemoryWait:
+			err = cmp.compileAtomicMemoryWait(op)
+		case wazeroir.OperationKindAtomicMemoryNotify:
+			err = cmp.compileAtomicMemoryNotify(op)
+		case wazeroir.OperationKindAtomicFence:
+			err = cmp.compileAtomicFence(op)
 		default:
 			err = errors.New("unsupported")
 		}

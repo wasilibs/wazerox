@@ -32,12 +32,12 @@ func TestCallEngine_growStack(t *testing.T) {
 			stackTop: uintptr(unsafe.Pointer(&s[15])),
 			execCtx: executionContext{
 				stackGrowRequiredSize:    160,
-				stackPointerBeforeGoCall: uintptr(unsafe.Pointer(&s[10])),
+				stackPointerBeforeGoCall: (*uint64)(unsafe.Pointer(&s[10])),
 			},
 		}
 		newSP, err := c.growStack()
 		require.NoError(t, err)
-		require.Equal(t, 160+32*2, len(c.stack))
+		require.Equal(t, 160+32*2+16, len(c.stack))
 
 		require.True(t, c.stackTop%16 == 0)
 		require.Equal(t, &c.stack[0], c.execCtx.stackBottomPtr)
@@ -53,4 +53,13 @@ func TestCallEngine_growStack(t *testing.T) {
 		require.True(t, newSP >= uintptr(unsafe.Pointer(c.execCtx.stackBottomPtr)))
 		require.True(t, newSP <= c.stackTop)
 	})
+}
+
+func TestCallEngine_requiredInitialStackSize(t *testing.T) {
+	c := &callEngine{}
+	require.Equal(t, 512, c.requiredInitialStackSize())
+	c.sizeOfParamResultSlice = 10
+	require.Equal(t, 512, c.requiredInitialStackSize())
+	c.sizeOfParamResultSlice = 120
+	require.Equal(t, 120*16+32+16, c.requiredInitialStackSize())
 }

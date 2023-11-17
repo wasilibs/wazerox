@@ -13,8 +13,6 @@ type FunctionABI interface {
 	CalleeGenFunctionArgsToVRegs(regs []ssa.Value)
 	// CalleeGenVRegsToFunctionReturns generates instructions to move virtual registers to a return value locations.
 	CalleeGenVRegsToFunctionReturns(regs []ssa.Value)
-	// EmitGoEntryPreamble emits a preamble machine codes for the given function to call this function from Go.
-	EmitGoEntryPreamble()
 }
 
 type (
@@ -28,6 +26,7 @@ type (
 		// This VReg must be based on RealReg.
 		Reg regalloc.VReg
 		// Offset is valid if Kind == ABIArgKindStack.
+		// This is the offset from the beginning of either arg or ret stack slot.
 		Offset int64
 		// Type is the type of the argument.
 		Type ssa.Type

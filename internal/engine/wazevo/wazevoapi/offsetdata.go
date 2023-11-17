@@ -1,6 +1,8 @@
 package wazevoapi
 
-import "github.com/tetratelabs/wazero/internal/wasm"
+import (
+	"github.com/tetratelabs/wazero/internal/wasm"
+)
 
 const (
 	// FunctionInstanceSize is the size of wazevo.functionInstance.
@@ -13,55 +15,41 @@ const (
 	FunctionInstanceTypeIDOffset = 16
 )
 
-var ExecutionContextOffsets = ExecutionContextOffsetData{
-	ExitCodeOffset:                          0,
-	CallerModuleContextPtr:                  8,
-	OriginalFramePointer:                    16,
-	OriginalStackPointer:                    24,
-	GoReturnAddress:                         32,
-	StackBottomPtr:                          40,
-	GoCallReturnAddress:                     48,
-	StackPointerBeforeGrow:                  56,
-	StackGrowRequiredSize:                   64,
-	MemoryGrowTrampolineAddress:             72,
-	StackGrowCallSequenceAddress:            80,
-	SavedRegistersBegin:                     96,
-	GoFunctionCallCalleeModuleContextOpaque: 1120,
-	GoFunctionCallStackBegin:                1128,
-}
-
-// ExecutionContextOffsetData allows the compilers to get the information about offsets to the fields of wazevo.executionContext,
-// which are necessary for compiling various instructions. This is globally unique.
-type ExecutionContextOffsetData struct {
-	// ExitCodeOffset is an offset of `exitCode` field in wazevo.executionContext
-	ExitCodeOffset Offset
-	// CallerModuleContextPtr is an offset of `callerModuleContextPtr` field in wazevo.executionContext
-	CallerModuleContextPtr Offset
-	// CallerModuleContextPtr is an offset of `originalFramePointer` field in wazevo.executionContext
-	OriginalFramePointer Offset
-	// OriginalStackPointer is an offset of `originalStackPointer` field in wazevo.executionContext
-	OriginalStackPointer Offset
-	// GoReturnAddress is an offset of `goReturnAddress` field in wazevo.executionContext
-	GoReturnAddress Offset
-	// StackBottomPtr is an offset of `stackBottomPtr` field in wazevo.executionContext
-	StackBottomPtr Offset
-	// GoCallReturnAddress is an offset of `goCallReturnAddress` field in wazevo.executionContext
-	GoCallReturnAddress Offset
-	// GoCallReturnAddress is an offset of `stackPointerBeforeGoCall` field in wazevo.executionContext
-	StackPointerBeforeGrow Offset
-	// StackGrowRequiredSize is an offset of `stackGrowRequiredSize` field in wazevo.executionContext
-	StackGrowRequiredSize Offset
-	// MemoryGrowTrampolineAddress is an offset of `memoryGrowTrampolineAddress` field in wazevo.executionContext
-	MemoryGrowTrampolineAddress Offset
-	// StackGrowCallSequenceAddress is an offset of `stackGrowCallSequenceAddress` field in wazevo.executionContext
-	StackGrowCallSequenceAddress Offset
-	// GoCallReturnAddress is an offset of the first element of `savedRegisters` field in wazevo.executionContext
-	SavedRegistersBegin Offset
-	// GoFunctionCallCalleeModuleContextOpaque is an offset of `goFunctionCallCalleeModuleContextOpaque` field in wazevo.executionContext
-	GoFunctionCallCalleeModuleContextOpaque Offset
-	// GoFunctionCallStackBegin is an offset of the first element of `goFunctionCallStack` field in wazevo.executionContext
-	GoFunctionCallStackBegin Offset
-}
+const (
+	// ExecutionContextOffsetExitCodeOffset is an offset of `exitCode` field in wazevo.executionContext
+	ExecutionContextOffsetExitCodeOffset Offset = 0
+	// ExecutionContextOffsetCallerModuleContextPtr is an offset of `callerModuleContextPtr` field in wazevo.executionContext
+	ExecutionContextOffsetCallerModuleContextPtr Offset = 8
+	// ExecutionContextOffsetOriginalFramePointer is an offset of `originalFramePointer` field in wazevo.executionContext
+	ExecutionContextOffsetOriginalFramePointer Offset = 16
+	// ExecutionContextOffsetOriginalStackPointer is an offset of `originalStackPointer` field in wazevo.executionContext
+	ExecutionContextOffsetOriginalStackPointer Offset = 24
+	// ExecutionContextOffsetGoReturnAddress is an offset of `goReturnAddress` field in wazevo.executionContext
+	ExecutionContextOffsetGoReturnAddress Offset = 32
+	// ExecutionContextOffsetStackBottomPtr is an offset of `stackBottomPtr` field in wazevo.executionContext
+	ExecutionContextOffsetStackBottomPtr Offset = 40
+	// ExecutionContextOffsetGoCallReturnAddress is an offset of `goCallReturnAddress` field in wazevo.executionContext
+	ExecutionContextOffsetGoCallReturnAddress Offset = 48
+	// ExecutionContextOffsetStackPointerBeforeGoCall is an offset of `StackPointerBeforeGoCall` field in wazevo.executionContext
+	ExecutionContextOffsetStackPointerBeforeGoCall Offset = 56
+	// ExecutionContextOffsetStackGrowRequiredSize is an offset of `stackGrowRequiredSize` field in wazevo.executionContext
+	ExecutionContextOffsetStackGrowRequiredSize Offset = 64
+	// ExecutionContextOffsetMemoryGrowTrampolineAddress is an offset of `memoryGrowTrampolineAddress` field in wazevo.executionContext
+	ExecutionContextOffsetMemoryGrowTrampolineAddress Offset = 72
+	// ExecutionContextOffsetStackGrowCallTrampolineAddress is an offset of `stackGrowCallTrampolineAddress` field in wazevo.executionContext.
+	ExecutionContextOffsetStackGrowCallTrampolineAddress Offset = 80
+	// ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress is an offset of `checkModuleExitCodeTrampolineAddress` field in wazevo.executionContext.
+	ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress Offset = 88
+	// ExecutionContextOffsetSavedRegistersBegin is an offset of the first element of `savedRegisters` field in wazevo.executionContext
+	ExecutionContextOffsetSavedRegistersBegin Offset = 96
+	// ExecutionContextOffsetGoFunctionCallCalleeModuleContextOpaque is an offset of `goFunctionCallCalleeModuleContextOpaque` field in wazevo.executionContext
+	ExecutionContextOffsetGoFunctionCallCalleeModuleContextOpaque Offset = 1120
+	// ExecutionContextOffsetTableGrowTrampolineAddress is an offset of `tableGrowTrampolineAddress` field in wazevo.executionContext
+	ExecutionContextOffsetTableGrowTrampolineAddress Offset = 1128
+	// ExecutionContextOffsetRefFuncTrampolineAddress is an offset of `refFuncTrampolineAddress` field in wazevo.executionContext
+	ExecutionContextOffsetRefFuncTrampolineAddress Offset = 1136
+	ExecutionContextOffsetMemmoveAddress           Offset = 1144
+)
 
 // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of wazevo.moduleContextOpaque,
 // This is unique per module.
@@ -73,7 +61,11 @@ type ModuleContextOffsetData struct {
 	ImportedFunctionsBegin,
 	GlobalsBegin,
 	TypeIDs1stElement,
-	TablesBegin Offset
+	TablesBegin,
+	BeforeListenerTrampolines1stElement,
+	AfterListenerTrampolines1stElement,
+	DataInstances1stElement,
+	ElementInstances1stElement Offset
 }
 
 // ImportedFunctionOffset returns an offset of the i-th imported function.
@@ -128,7 +120,7 @@ func (m *ModuleContextOffsetData) TableOffset(tableIndex int) Offset {
 
 // NewModuleContextOffsetData creates a ModuleContextOffsetData determining the structure of moduleContextOpaque for the given Module.
 // The structure is described in the comment of wazevo.moduleContextOpaque.
-func NewModuleContextOffsetData(m *wasm.Module) ModuleContextOffsetData {
+func NewModuleContextOffsetData(m *wasm.Module, withListener bool) ModuleContextOffsetData {
 	ret := ModuleContextOffsetData{}
 	var offset Offset
 
@@ -183,6 +175,23 @@ func NewModuleContextOffsetData(m *wasm.Module) ModuleContextOffsetData {
 		ret.TypeIDs1stElement = -1
 		ret.TablesBegin = -1
 	}
+
+	if withListener {
+		ret.BeforeListenerTrampolines1stElement = offset
+		offset += 8 // First element of BeforeListenerTrampolines.
+
+		ret.AfterListenerTrampolines1stElement = offset
+		offset += 8 // First element of AfterListenerTrampolines.
+	} else {
+		ret.BeforeListenerTrampolines1stElement = -1
+		ret.AfterListenerTrampolines1stElement = -1
+	}
+
+	ret.DataInstances1stElement = offset
+	offset += 8 // First element of DataInstances.
+
+	ret.ElementInstances1stElement = offset
+	offset += 8 // First element of ElementInstances.
 
 	ret.TotalSize = int(offset)
 	return ret

@@ -45,6 +45,13 @@ func MmapCodeSegment(size int) ([]byte, error) {
 	}
 }
 
+func MmapMemory(size int) ([]byte, error) {
+	if size == 0 {
+		panic("BUG: MmapMemory with zero length")
+	}
+	return mmapMemory(size)
+}
+
 // RemapCodeSegment reallocates the memory mapping of an existing code segment
 // to increase its size. The previous code mapping is unmapped and must not be
 // reused after the function returns.

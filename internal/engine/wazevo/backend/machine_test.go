@@ -24,6 +24,10 @@ type mockMachine struct {
 	rinfo                  *regalloc.RegisterInfo
 }
 
+func (m mockMachine) CompileEntryPreamble(signature *ssa.Signature) []byte {
+	panic("TODO")
+}
+
 func (m mockMachine) CompileStackGrowCallSequence() []byte {
 	panic("TODO")
 }
@@ -52,7 +56,7 @@ func (m mockMachine) ResolveRelativeAddresses() {}
 func (m mockMachine) Function() (f regalloc.Function) { return }
 
 // RegisterInfo implements Machine.RegisterInfo.
-func (m mockMachine) RegisterInfo() *regalloc.RegisterInfo {
+func (m mockMachine) RegisterInfo(bool) *regalloc.RegisterInfo {
 	if m.rinfo != nil {
 		return m.rinfo
 	}
@@ -118,7 +122,7 @@ func (m mockMachine) Reset() {
 func (m mockMachine) FlushPendingInstructions() {}
 
 // InsertMove implements Machine.InsertMove.
-func (m mockMachine) InsertMove(dst, src regalloc.VReg) {
+func (m mockMachine) InsertMove(dst, src regalloc.VReg, typ ssa.Type) {
 	m.insertMove(dst, src)
 }
 

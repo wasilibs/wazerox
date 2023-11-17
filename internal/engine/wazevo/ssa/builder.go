@@ -68,8 +68,8 @@ type Builder interface {
 	// DeclareSignature appends the *Signature to be referenced by various instructions (e.g. OpcodeCall).
 	DeclareSignature(signature *Signature)
 
-	// UsedSignatures returns the slice of Signatures which are used/referenced by the currently-compiled function.
-	UsedSignatures() []*Signature
+	// Signatures returns the slice of declared Signatures.
+	Signatures() []*Signature
 
 	// ResolveSignature returns the Signature which corresponds to SignatureID.
 	ResolveSignature(id SignatureID) *Signature
@@ -118,13 +118,25 @@ type Builder interface {
 
 	// InsertUndefined inserts an undefined instruction at the current position.
 	InsertUndefined()
+
+	// SetCurrentSourceOffset sets the current source offset. The incoming instruction will be annotated with this offset.
+	SetCurrentSourceOffset(line SourceOffset)
+
+	// LoopNestingForestRoots returns the roots of the loop nesting forest.
+	LoopNestingForestRoots() []BasicBlock
+
+	// LowestCommonAncestor returns the lowest common ancestor in the dominator tree of the given BasicBlock(s).
+	LowestCommonAncestor(blk1, blk2 BasicBlock) BasicBlock
+
+	// Idom returns the immediate dominator of the given BasicBlock.
+	Idom(blk BasicBlock) BasicBlock
 }
 
 // NewBuilder returns a new Builder implementation.
 func NewBuilder() Builder {
 	return &builder{
-		instructionsPool:               wazevoapi.NewPool[Instruction](),
-		basicBlocksPool:                wazevoapi.NewPool[basicBlock](),
+		instructionsPool:               wazevoapi.NewPool[Instruction](resetInstruction),
+		basicBlocksPool:                wazevoapi.NewPool[basicBlock](resetBasicBlock),
 		valueAnnotations:               make(map[ValueID]string),
 		signatures:                     make(map[SignatureID]*Signature),
 		blkVisited:                     make(map[*basicBlock]int),
@@ -163,6 +175,10 @@ type builder struct {
 	// dominators stores the immediate dominator of each BasicBlock.
 	// The index is blockID of the BasicBlock.
 	dominators []*basicBlock
+	sparseTree dominatorSparseTree
+
+	// loopNestingForestRoots are the roots of the loop nesting forest.
+	loopNestingForestRoots []BasicBlock
 
 	// The followings are used for optimization passes/deterministic compilation.
 	instStack                      []*Instruction
@@ -181,6 +197,8 @@ type builder struct {
 	donePasses bool
 	// doneBlockLayout is true if LayoutBlocks is called.
 	doneBlockLayout bool
+
+	currentSourceOffset SourceOffset
 }
 
 // ReturnBlock implements Builder.ReturnBlock.
@@ -190,8 +208,9 @@ func (b *builder) ReturnBlock() BasicBlock {
 
 // Init implements Builder.Reset.
 func (b *builder) Init(s *Signature) {
+	b.nextVariable = 0
 	b.currentSignature = s
-	b.returnBlk.reset()
+	resetBasicBlock(b.returnBlk)
 	b.instructionsPool.Reset()
 	b.basicBlocksPool.Reset()
 	b.donePasses = false
@@ -203,17 +222,13 @@ func (b *builder) Init(s *Signature) {
 	b.blkStack = b.blkStack[:0]
 	b.blkStack2 = b.blkStack2[:0]
 	b.dominators = b.dominators[:0]
+	b.loopNestingForestRoots = b.loopNestingForestRoots[:0]
 
 	for i := 0; i < b.basicBlocksPool.Allocated(); i++ {
 		blk := b.basicBlocksPool.View(i)
-		blk.reset()
 		delete(b.blkVisited, blk)
 	}
 	b.basicBlocksPool.Reset()
-
-	for i := Variable(0); i < b.nextVariable; i++ {
-		b.variables[i] = typeInvalid
-	}
 
 	for v := ValueID(0); v < b.nextValueID; v++ {
 		delete(b.valueAnnotations, v)
@@ -228,6 +243,8 @@ func (b *builder) Init(s *Signature) {
 	for i := range b.valueRefCounts {
 		b.valueRefCounts[i] = 0
 	}
+
+	b.currentSourceOffset = sourceOffsetUnknown
 }
 
 // Signature implements Builder.Signature.
@@ -243,7 +260,7 @@ func (b *builder) AnnotateValue(value Value, a string) {
 // AllocateInstruction implements Builder.AllocateInstruction.
 func (b *builder) AllocateInstruction() *Instruction {
 	instr := b.instructionsPool.Allocate()
-	instr.reset()
+	instr.id = b.instructionsPool.Allocated()
 	return instr
 }
 
@@ -253,8 +270,23 @@ func (b *builder) DeclareSignature(s *Signature) {
 	s.used = false
 }
 
-// UsedSignatures implements Builder.UsedSignatures.
-func (b *builder) UsedSignatures() (ret []*Signature) {
+// Signatures implements Builder.Signatures.
+func (b *builder) Signatures() (ret []*Signature) {
+	for _, sig := range b.signatures {
+		ret = append(ret, sig)
+	}
+	sort.Slice(ret, func(i, j int) bool {
+		return ret[i].ID < ret[j].ID
+	})
+	return
+}
+
+// SetCurrentSourceOffset implements Builder.SetCurrentSourceOffset.
+func (b *builder) SetCurrentSourceOffset(l SourceOffset) {
+	b.currentSourceOffset = l
+}
+
+func (b *builder) usedSignatures() (ret []*Signature) {
 	for _, sig := range b.signatures {
 		if sig.used {
 			ret = append(ret, sig)
@@ -263,7 +295,6 @@ func (b *builder) UsedSignatures() (ret []*Signature) {
 	sort.Slice(ret, func(i, j int) bool {
 		return ret[i].ID < ret[j].ID
 	})
-
 	return
 }
 
@@ -287,9 +318,23 @@ func (b *builder) allocateBasicBlock() *basicBlock {
 	return blk
 }
 
+// Idom implements Builder.Idom.
+func (b *builder) Idom(blk BasicBlock) BasicBlock {
+	return b.dominators[blk.ID()]
+}
+
 // InsertInstruction implements Builder.InsertInstruction.
 func (b *builder) InsertInstruction(instr *Instruction) {
 	b.currentBB.InsertInstruction(instr)
+
+	if l := b.currentSourceOffset; l.Valid() {
+		// Emit the source offset info only when the instruction has side effect because
+		// these are the only instructions that are accessed by stack unwinding.
+		// This reduces the significant amount of the offset info in the binary.
+		if instr.sideEffect() != sideEffectNone {
+			instr.annotateSourceOffset(l)
+		}
+	}
 
 	resultTypesFn := instructionReturnTypes[instr.opcode]
 	if resultTypesFn == nil {
@@ -499,7 +544,7 @@ func (b *builder) definedVariableType(variable Variable) Type {
 // Format implements Builder.Format.
 func (b *builder) Format() string {
 	str := strings.Builder{}
-	usedSigs := b.UsedSignatures()
+	usedSigs := b.usedSignatures()
 	if len(usedSigs) > 0 {
 		str.WriteByte('\n')
 		str.WriteString("signatures:\n")
@@ -799,12 +844,6 @@ func (b *builder) LayoutBlocks() {
 			bs = append(bs, blk.Name())
 		}
 		fmt.Println("ordered blocks: ", strings.Join(bs, ", "))
-		bs = bs[:0]
-		for visited := range b.blkVisited {
-			bs = append(bs, visited.Name())
-		}
-		sort.Slice(bs, func(i, j int) bool { return bs[i] < bs[j] })
-		fmt.Println("visited blocks: ", strings.Join(bs, ", "))
 	}
 
 	if wazevoapi.SSAValidationEnabled {
@@ -815,6 +854,10 @@ func (b *builder) LayoutBlocks() {
 			trampoline.validate(b)
 		}
 	}
+
+	// Critical edges are split, so we fix the loop nesting forest.
+	buildLoopNestingForest(b)
+	buildDominatorTree(b)
 
 	// Reuse the stack for the next iteration.
 	b.blkStack2 = uninsertedTrampolines[:0]
@@ -938,6 +981,11 @@ func (b *builder) splitCriticalEdge(pred, succ *basicBlock, predInfo *basicBlock
 	// where trampoline is a new basic block which is created to split the critical edge.
 
 	trampoline := b.allocateBasicBlock()
+	if int(trampoline.id) >= len(b.dominators) {
+		b.dominators = append(b.dominators, make([]*basicBlock, trampoline.id+1)...)
+	}
+	b.dominators[trampoline.id] = pred
+
 	originalBranch := predInfo.branch
 
 	// Replace originalBranch with the newBranch.
@@ -1005,4 +1053,14 @@ func (b *builder) InsertUndefined() {
 	instr := b.AllocateInstruction()
 	instr.opcode = OpcodeUndefined
 	b.InsertInstruction(instr)
+}
+
+// LoopNestingForestRoots implements Builder.LoopNestingForestRoots.
+func (b *builder) LoopNestingForestRoots() []BasicBlock {
+	return b.loopNestingForestRoots
+}
+
+// LowestCommonAncestor implements Builder.LowestCommonAncestor.
+func (b *builder) LowestCommonAncestor(blk1, blk2 BasicBlock) BasicBlock {
+	return b.sparseTree.findLCA(blk1.ID(), blk2.ID())
 }

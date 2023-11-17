@@ -158,6 +158,7 @@ var (
 	// lr (link register) holds the return address at the function entry.
 	lrVReg = x30VReg
 	// tmpReg is used to perform spill/load on large stack offsets, and load large constants.
+	// Therefore, be cautious to use this register in the middle of the compilation, especially before the register allocation.
 	// This is the same as golang/go, but it's only described in the source code:
 	// https://github.com/golang/go/blob/18e17e2cb12837ea2c8582ecdb0cc780f49a1aac/src/cmd/compile/internal/ssa/_gen/ARM64Ops.go#L59
 	// https://github.com/golang/go/blob/18e17e2cb12837ea2c8582ecdb0cc780f49a1aac/src/cmd/compile/internal/ssa/_gen/ARM64Ops.go#L13-L15
@@ -286,8 +287,7 @@ func formatVRegSized(r regalloc.VReg, size byte) (ret string) {
 				panic("BUG: invalid register size")
 			}
 		default:
-			fmt.Println(r)
-			panic("BUG: invalid register type")
+			panic(fmt.Sprintf("BUG: invalid register type: %d for %s", r.RegType(), r))
 		}
 	}
 	return

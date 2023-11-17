@@ -5,8 +5,10 @@ import (
 	"unsafe"
 
 	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
 	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/tetratelabs/wazero/internal/wasmruntime"
 )
 
 type (
@@ -19,12 +21,14 @@ type (
 		opaque                 moduleContextOpaque
 		localFunctionInstances []*functionInstance
 		importedFunctions      []importedFunction
+		listeners              []experimental.FunctionListener
 	}
 
 	functionInstance struct {
 		executable             *byte
 		moduleContextOpaquePtr *byte
 		typeID                 wasm.FunctionTypeID
+		indexInModule          wasm.Index
 	}
 
 	importedFunction struct {
@@ -48,7 +52,10 @@ type (
 	//      globals                                   []*wasm.GlobalInstance (optional)
 	//      typeIDsBegin                              &wasm.ModuleInstance.TypeIDs[0]  (optional)
 	//      tables                                    []*wasm.TableInstance  (optional)
-	// 	    TODO: add more fields, like tables, etc.
+	// 	    beforeListenerTrampolines1stElement       **byte                 (optional)
+	// 	    afterListenerTrampolines1stElement        **byte                 (optional)
+	//      dataInstances1stElement                   []wasm.DataInstance    (optional)
+	//      elementInstances1stElement                []wasm.ElementInstance (optional)
 	// 	}
 	//
 	// See wazevoapi.NewModuleContextOffsetData for the details of the offsets.
@@ -103,6 +110,19 @@ func (m *moduleEngine) setupOpaque() {
 			tableOffset += 8
 		}
 	}
+
+	if beforeListenerOffset := offsets.BeforeListenerTrampolines1stElement; beforeListenerOffset >= 0 {
+		binary.LittleEndian.PutUint64(opaque[beforeListenerOffset:], uint64(uintptr(unsafe.Pointer(&m.parent.listenerBeforeTrampolines[0]))))
+	}
+	if afterListenerOffset := offsets.AfterListenerTrampolines1stElement; afterListenerOffset >= 0 {
+		binary.LittleEndian.PutUint64(opaque[afterListenerOffset:], uint64(uintptr(unsafe.Pointer(&m.parent.listenerAfterTrampolines[0]))))
+	}
+	if len(inst.DataInstances) > 0 {
+		binary.LittleEndian.PutUint64(opaque[offsets.DataInstances1stElement:], uint64(uintptr(unsafe.Pointer(&inst.DataInstances[0]))))
+	}
+	if len(inst.ElementInstances) > 0 {
+		binary.LittleEndian.PutUint64(opaque[offsets.ElementInstances1stElement:], uint64(uintptr(unsafe.Pointer(&inst.ElementInstances[0]))))
+	}
 }
 
 // NewFunction implements wasm.ModuleEngine.
@@ -120,9 +140,10 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 	}
 
 	src := m.module.Source
-	typ := src.TypeSection[src.FunctionSection[localIndex]]
-	sizeOfParamResultSlice := len(typ.Results)
-	if ps := len(typ.Params); ps > sizeOfParamResultSlice {
+	typIndex := src.FunctionSection[localIndex]
+	typ := src.TypeSection[typIndex]
+	sizeOfParamResultSlice := typ.ResultNumInUint64
+	if ps := typ.ParamNumInUint64; ps > sizeOfParamResultSlice {
 		sizeOfParamResultSlice = ps
 	}
 	p := m.parent
@@ -130,14 +151,20 @@ func (m *moduleEngine) NewFunction(index wasm.Index) api.Function {
 
 	ce := &callEngine{
 		indexInModule:          index,
-		executable:             &p.executable[offset.offset],
+		executable:             &p.executable[offset],
 		parent:                 m,
+		preambleExecutable:     &m.parent.entryPreambles[typIndex][0],
 		sizeOfParamResultSlice: sizeOfParamResultSlice,
+		requiredParams:         typ.ParamNumInUint64,
 		numberOfResults:        typ.ResultNumInUint64,
 	}
 
-	ce.execCtx.memoryGrowTrampolineAddress = &m.parent.builtinFunctions.memoryGrowExecutable[0]
-	ce.execCtx.stackGrowCallSequenceAddress = &m.parent.builtinFunctions.stackGrowExecutable[0]
+	ce.execCtx.memoryGrowTrampolineAddress = &m.parent.sharedFunctions.memoryGrowExecutable[0]
+	ce.execCtx.stackGrowCallTrampolineAddress = &m.parent.sharedFunctions.stackGrowExecutable[0]
+	ce.execCtx.checkModuleExitCodeTrampolineAddress = &m.parent.sharedFunctions.checkModuleExitCode[0]
+	ce.execCtx.tableGrowTrampolineAddress = &m.parent.sharedFunctions.tableGrowExecutable[0]
+	ce.execCtx.refFuncTrampolineAddress = &m.parent.sharedFunctions.refFuncExecutable[0]
+	ce.execCtx.memmoveAddress = memmovPtr
 	ce.init()
 	return ce
 }
@@ -147,10 +174,17 @@ func (m *moduleEngine) ResolveImportedFunction(index, indexInImportedModule wasm
 	executableOffset, moduleCtxOffset, typeIDOffset := m.parent.offsets.ImportedFunctionOffset(index)
 	importedME := importedModuleEngine.(*moduleEngine)
 
+	if int(indexInImportedModule) >= len(importedME.importedFunctions) {
+		indexInImportedModule -= wasm.Index(len(importedME.importedFunctions))
+	} else {
+		imported := &importedME.importedFunctions[indexInImportedModule]
+		m.ResolveImportedFunction(index, imported.indexInModule, imported.me)
+		return // Recursively resolve the imported function.
+	}
+
 	offset := importedME.parent.functionOffsets[indexInImportedModule]
 	typeID := getTypeIDOf(indexInImportedModule, importedME.module)
-	// When calling imported function from the machine code, we need to skip the Go preamble.
-	executable := &importedME.parent.executable[offset.nativeBegin()]
+	executable := &importedME.parent.executable[offset]
 	// Write functionInstance.
 	binary.LittleEndian.PutUint64(m.opaque[executableOffset:], uint64(uintptr(unsafe.Pointer(executable))))
 	binary.LittleEndian.PutUint64(m.opaque[moduleCtxOffset:], uint64(uintptr(unsafe.Pointer(importedME.opaquePtr))))
@@ -215,15 +249,16 @@ func (m *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Refe
 		begin, _, _ := m.parent.offsets.ImportedFunctionOffset(funcIndex)
 		return uintptr(unsafe.Pointer(&m.opaque[begin]))
 	}
-	funcIndex -= m.module.Source.ImportFunctionCount
+	localIndex := funcIndex - m.module.Source.ImportFunctionCount
 	p := m.parent
-	executable := &p.executable[p.functionOffsets[funcIndex].nativeBegin()]
-	typeID := m.module.TypeIDs[m.module.Source.FunctionSection[funcIndex]]
+	executable := &p.executable[p.functionOffsets[localIndex]]
+	typeID := m.module.TypeIDs[m.module.Source.FunctionSection[localIndex]]
 
 	lf := &functionInstance{
 		executable:             executable,
 		moduleContextOpaquePtr: m.opaquePtr,
 		typeID:                 typeID,
+		indexInModule:          funcIndex,
 	}
 	m.localFunctionInstances = append(m.localFunctionInstances, lf)
 	return uintptr(unsafe.Pointer(lf))
@@ -231,5 +266,33 @@ func (m *moduleEngine) FunctionInstanceReference(funcIndex wasm.Index) wasm.Refe
 
 // LookupFunction implements wasm.ModuleEngine.
 func (m *moduleEngine) LookupFunction(t *wasm.TableInstance, typeId wasm.FunctionTypeID, tableOffset wasm.Index) (*wasm.ModuleInstance, wasm.Index) {
-	panic("TODO")
+	if tableOffset >= uint32(len(t.References)) || t.Type != wasm.RefTypeFuncref {
+		panic(wasmruntime.ErrRuntimeInvalidTableAccess)
+	}
+	rawPtr := t.References[tableOffset]
+	if rawPtr == 0 {
+		panic(wasmruntime.ErrRuntimeInvalidTableAccess)
+	}
+
+	tf := functionFromUintptr(rawPtr)
+	if tf.typeID != typeId {
+		panic(wasmruntime.ErrRuntimeIndirectCallTypeMismatch)
+	}
+	return moduleInstanceFromOpaquePtr(tf.moduleContextOpaquePtr), tf.indexInModule
+}
+
+// functionFromUintptr resurrects the original *function from the given uintptr
+// which comes from either funcref table or OpcodeRefFunc instruction.
+func functionFromUintptr(ptr uintptr) *functionInstance {
+	// Wraps ptrs as the double pointer in order to avoid the unsafe access as detected by race detector.
+	//
+	// For example, if we have (*function)(unsafe.Pointer(ptr)) instead, then the race detector's "checkptr"
+	// subroutine wanrs as "checkptr: pointer arithmetic result points to invalid allocation"
+	// https://github.com/golang/go/blob/1ce7fcf139417d618c2730010ede2afb41664211/src/runtime/checkptr.go#L69
+	var wrapped *uintptr = &ptr
+	return *(**functionInstance)(unsafe.Pointer(wrapped))
+}
+
+func moduleInstanceFromOpaquePtr(ptr *byte) *wasm.ModuleInstance {
+	return *(**wasm.ModuleInstance)(unsafe.Pointer(ptr))
 }

@@ -14,7 +14,9 @@ type (
 
 		// RegisterInfo returns the set of registers that can be used for register allocation.
 		// This is only called once, and the result is shared across all compilations.
-		RegisterInfo() *regalloc.RegisterInfo
+		//
+		// If debug is true, this returns the register set for debugging purpose.
+		RegisterInfo(debug bool) *regalloc.RegisterInfo
 
 		// InitializeABI initializes the FunctionABI for the given signature.
 		InitializeABI(sig *ssa.Signature)
@@ -64,8 +66,8 @@ type (
 		// This will be called after the lowering of each SSA Instruction.
 		FlushPendingInstructions()
 
-		// InsertMove inserts a move instruction from src to dst.
-		InsertMove(dst, src regalloc.VReg)
+		// InsertMove inserts a move instruction from src to dst whose type is typ.
+		InsertMove(dst, src regalloc.VReg, typ ssa.Type)
 
 		// InsertReturn inserts the return instruction to return from the current function.
 		InsertReturn()
@@ -103,5 +105,9 @@ type (
 		// CompileStackGrowCallSequence returns the sequence of instructions shared by all functions to
 		// call the stack grow builtin function.
 		CompileStackGrowCallSequence() []byte
+
+		// CompileEntryPreamble returns the sequence of instructions shared by multiple functions to
+		// enter the function from Go.
+		CompileEntryPreamble(signature *ssa.Signature) []byte
 	}
 )

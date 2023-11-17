@@ -1,7 +1,6 @@
 package frontend
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/tetratelabs/wazero/api"
@@ -17,7 +16,9 @@ func TestCompiler_LowerToSSA(t *testing.T) {
 	// what output should look like, you can run:
 	// `~/wasmtime/target/debug/clif-util wasm --target aarch64-apple-darwin testcase.wat -p -t`
 	for _, tc := range []struct {
-		name string
+		name              string
+		ensureTermination bool
+		needListener      bool
 		// m is the *wasm.Module to be compiled in this test.
 		m *wasm.Module
 		// targetIndex is the index of a local function to be compiled in this test.
@@ -62,6 +63,30 @@ blk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:i32)
 	v4:i32 = Iadd v2, v3
 	v5:i32 = Isub v4, v2
 	Jump blk_ret, v5
+`,
+		},
+		{
+			name: "add/sub params return / listener", m: testcases.AddSubParamsReturn.Module,
+			needListener: true,
+			exp: `
+signatures:
+	sig1: i64i32i32i32_v
+	sig2: i64i32i32_v
+
+blk0: (exec_ctx:i64, module_ctx:i64, v2:i32, v3:i32)
+	Store module_ctx, exec_ctx, 0x8
+	v4:i64 = Load module_ctx, 0x8
+	v5:i64 = Load v4, 0x0
+	v6:i32 = Iconst_32 0x0
+	CallIndirect v5:sig1, exec_ctx, v6, v2, v3
+	v7:i32 = Iadd v2, v3
+	v8:i32 = Isub v7, v2
+	Store module_ctx, exec_ctx, 0x8
+	v9:i64 = Load module_ctx, 0x10
+	v10:i64 = Load v9, 0x0
+	v11:i32 = Iconst_32 0x0
+	CallIndirect v10:sig2, exec_ctx, v11, v8
+	Jump blk_ret, v8
 `,
 		},
 		{
@@ -218,6 +243,36 @@ blk0: (exec_ctx:i64, module_ctx:i64)
 	Jump blk1
 
 blk1: () <-- (blk0,blk1)
+	Jump blk1
+`,
+		},
+		{
+			name: "loop - br / ensure termination", m: testcases.LoopBr.Module,
+			ensureTermination: true,
+			exp: `
+signatures:
+	sig2: i64_v
+
+blk0: (exec_ctx:i64, module_ctx:i64)
+	Jump blk1
+
+blk1: () <-- (blk0,blk1)
+	v2:i64 = Load exec_ctx, 0x58
+	CallIndirect v2:sig2, exec_ctx
+	Jump blk1
+
+blk2: ()
+`,
+			expAfterOpt: `
+signatures:
+	sig2: i64_v
+
+blk0: (exec_ctx:i64, module_ctx:i64)
+	Jump blk1
+
+blk1: () <-- (blk0,blk1)
+	v2:i64 = Load exec_ctx, 0x58
+	CallIndirect v2:sig2, exec_ctx
 	Jump blk1
 `,
 		},
@@ -677,6 +732,21 @@ blk0: (exec_ctx:i64, module_ctx:i64, v2:f64, v3:f32)
 	v12:f32 = Fdemote v2
 	v13:f64 = Fpromote v3
 	Jump blk_ret, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13
+`,
+		},
+		{
+			name: "non-trapping float conversions", m: testcases.NonTrappingFloatConversions.Module,
+			exp: `
+blk0: (exec_ctx:i64, module_ctx:i64, v2:f64, v3:f32)
+	v4:i64 = FcvtToSintSat v2
+	v5:i64 = FcvtToSintSat v3
+	v6:i32 = FcvtToSintSat v2
+	v7:i32 = FcvtToSintSat v3
+	v8:i64 = FcvtToUintSat v2
+	v9:i64 = FcvtToUintSat v3
+	v10:i32 = FcvtToUintSat v2
+	v11:i32 = FcvtToUintSat v3
+	Jump blk_ret, v4, v5, v6, v7, v8, v9, v10, v11
 `,
 		},
 		{
@@ -1367,9 +1437,9 @@ blk0: (exec_ctx:i64, module_ctx:i64)
 	v7:i64 = Load module_ctx, 0x8
 	v8:i64 = Load v7, 0x8
 	v9:i64 = Load module_ctx, 0x8
-	v10:i64 = Load v9, 0x8
+	v10:i32 = Load v9, 0x8
 	v11:i32 = Iconst_32 0x10
-	v12:i64 = Ushr v10, v11
+	v12:i32 = Ushr v10, v11
 	v13:i32 = Iconst_32 0xa
 	Store module_ctx, exec_ctx, 0x8
 	v14:i64 = Load exec_ctx, 0x48
@@ -1387,9 +1457,9 @@ blk0: (exec_ctx:i64, module_ctx:i64)
 	v25:i64 = Load module_ctx, 0x8
 	v26:i64 = Load v25, 0x8
 	v27:i64 = Load module_ctx, 0x8
-	v28:i64 = Load v27, 0x8
+	v28:i32 = Load v27, 0x8
 	v29:i32 = Iconst_32 0x10
-	v30:i64 = Ushr v28, v29
+	v30:i32 = Ushr v28, v29
 	Jump blk_ret, v4, v12, v22, v30
 `,
 			expAfterOpt: `
@@ -1403,9 +1473,9 @@ blk0: (exec_ctx:i64, module_ctx:i64)
 	v3:i64 = Load module_ctx, 0x20
 	v4:i32 = CallIndirect v2:sig0, exec_ctx, v3
 	v9:i64 = Load module_ctx, 0x8
-	v10:i64 = Load v9, 0x8
+	v10:i32 = Load v9, 0x8
 	v11:i32 = Iconst_32 0x10
-	v12:i64 = Ushr v10, v11
+	v12:i32 = Ushr v10, v11
 	v13:i32 = Iconst_32 0xa
 	Store module_ctx, exec_ctx, 0x8
 	v14:i64 = Load exec_ctx, 0x48
@@ -1415,9 +1485,9 @@ blk0: (exec_ctx:i64, module_ctx:i64)
 	v21:i64 = Load module_ctx, 0x20
 	v22:i32 = CallIndirect v20:sig0, exec_ctx, v21
 	v27:i64 = Load module_ctx, 0x8
-	v28:i64 = Load v27, 0x8
+	v28:i32 = Load v27, 0x8
 	v29:i32 = Iconst_32 0x10
-	v30:i64 = Ushr v28, v29
+	v30:i32 = Ushr v28, v29
 	Jump blk_ret, v4, v12, v22, v30
 `,
 		},
@@ -1663,6 +1733,62 @@ blk13: () <-- (blk0)
 	Jump blk6
 `,
 		},
+		{
+			name: "if_then_end_nesting_unreachable_if_then_else_end", m: testcases.IfThenEndNestingUnreachableIfThenElseEnd.Module,
+			exp: `
+blk0: (exec_ctx:i64, module_ctx:i64, v2:f64, v3:f64, v4:f64)
+	v6:i32 = Load module_ctx, 0x10
+	v7:i32 = Iconst_32 0x10
+	v8:i32 = Ushr v6, v7
+	Brz v8, blk3
+	Jump blk2
+
+blk1: (v5:i64) <-- (blk4)
+	Jump blk_ret
+
+blk2: () <-- (blk0)
+	v9:i32 = Load module_ctx, 0x10
+	v10:i32 = Iconst_32 0x10
+	v11:i32 = Ushr v9, v10
+	Jump blk4
+
+blk3: () <-- (blk0)
+	Jump blk4
+
+blk4: () <-- (blk2,blk3)
+	v12:i64 = Iconst_64 0x0
+	Jump blk1, v12
+`,
+			expAfterOpt: `
+blk0: (exec_ctx:i64, module_ctx:i64, v2:f64, v3:f64, v4:f64)
+	v6:i32 = Load module_ctx, 0x10
+	v7:i32 = Iconst_32 0x10
+	v8:i32 = Ushr v6, v7
+	Brz v8, blk3
+	Jump blk2
+
+blk1: () <-- (blk4)
+	Jump blk_ret
+
+blk2: () <-- (blk0)
+	Jump blk4
+
+blk3: () <-- (blk0)
+	Jump blk4
+
+blk4: () <-- (blk2,blk3)
+	Jump blk1
+`,
+		},
+		{
+			name: "VecShuffle",
+			m:    testcases.VecShuffle.Module,
+			exp: `
+blk0: (exec_ctx:i64, module_ctx:i64, v2:v128, v3:v128)
+	v4:v128 = Shuffle.[0 1 2 3 4 5 6 7 24 25 26 27 28 29 30 31] v2, v3
+	Jump blk_ret, v4
+`,
+		},
 	} {
 
 		tc := tc
@@ -1673,23 +1799,20 @@ blk13: () <-- (blk0)
 
 			b := ssa.NewBuilder()
 
-			offset := wazevoapi.NewModuleContextOffsetData(tc.m)
-			fc := NewFrontendCompiler(tc.m, b, &offset)
+			offset := wazevoapi.NewModuleContextOffsetData(tc.m, tc.needListener)
+			fc := NewFrontendCompiler(tc.m, b, &offset, tc.ensureTermination, tc.needListener, false)
 			typeIndex := tc.m.FunctionSection[tc.targetIndex]
 			code := &tc.m.CodeSection[tc.targetIndex]
-			fc.Init(tc.targetIndex, &tc.m.TypeSection[typeIndex], code.LocalTypes, code.Body)
+			fc.Init(tc.targetIndex, typeIndex, &tc.m.TypeSection[typeIndex], code.LocalTypes, code.Body, tc.needListener, 0)
 
-			err = fc.LowerToSSA()
-			require.NoError(t, err)
+			fc.LowerToSSA()
 
 			actual := fc.formatBuilder()
-			fmt.Println(actual)
 			require.Equal(t, tc.exp, actual)
 
 			b.RunPasses()
 			if expAfterOpt := tc.expAfterOpt; expAfterOpt != "" {
 				actualAfterOpt := fc.formatBuilder()
-				fmt.Println(actualAfterOpt)
 				require.Equal(t, expAfterOpt, actualAfterOpt)
 			}
 
@@ -1697,4 +1820,117 @@ blk13: () <-- (blk0)
 			b.LayoutBlocks()
 		})
 	}
+}
+
+func TestSignatureForListener(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		sig           *wasm.FunctionType
+		before, after *ssa.Signature
+	}{
+		{
+			name:   "empty",
+			sig:    &wasm.FunctionType{},
+			before: &ssa.Signature{Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
+			after:  &ssa.Signature{Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
+		},
+		{
+			name: "multi",
+			sig: &wasm.FunctionType{
+				Params: []wasm.ValueType{wasm.ValueTypeF64, wasm.ValueTypeI32},
+				Results: []wasm.ValueType{
+					wasm.ValueTypeI64, wasm.ValueTypeI32, wasm.ValueTypeF32, wasm.ValueTypeF64, wasm.ValueTypeV128,
+				},
+			},
+			before: &ssa.Signature{
+				Params: []ssa.Type{
+					ssa.TypeI64, ssa.TypeI32,
+					ssa.TypeF64, ssa.TypeI32,
+				},
+			},
+			after: &ssa.Signature{
+				Params: []ssa.Type{
+					ssa.TypeI64, ssa.TypeI32,
+					ssa.TypeI64, ssa.TypeI32, ssa.TypeF32, ssa.TypeF64, ssa.TypeV128,
+				},
+			},
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			before, after := SignatureForListener(tc.sig)
+			require.Equal(t, tc.before, before)
+			require.Equal(t, tc.after, after)
+		})
+	}
+}
+
+func TestCompiler_declareSignatures(t *testing.T) {
+	m := &wasm.Module{
+		TypeSection: []wasm.FunctionType{
+			{},
+			{Params: []wasm.ValueType{wasm.ValueTypeI64, wasm.ValueTypeI32}},
+			{Params: []wasm.ValueType{wasm.ValueTypeF64, wasm.ValueTypeI32}},
+			{Results: []wasm.ValueType{wasm.ValueTypeI64, wasm.ValueTypeI32}},
+		},
+	}
+
+	t.Run("listener=false", func(t *testing.T) {
+		builder := ssa.NewBuilder()
+		c := &Compiler{m: m, ssaBuilder: builder}
+		c.declareSignatures(false)
+
+		declaredSigs := builder.Signatures()
+		expected := []*ssa.Signature{
+			{ID: 0, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 1, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI32}},
+			{ID: 2, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeF64, ssa.TypeI32}},
+			{ID: 3, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
+			{ID: 4, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 5, Params: []ssa.Type{ssa.TypeI64}},
+			{ID: 6, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 7, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 8, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI32}},
+		}
+
+		require.Equal(t, len(expected), len(declaredSigs))
+		for i := 0; i < len(expected); i++ {
+			require.Equal(t, expected[i].String(), declaredSigs[i].String(), i)
+		}
+	})
+
+	t.Run("listener=false", func(t *testing.T) {
+		builder := ssa.NewBuilder()
+		c := &Compiler{m: m, ssaBuilder: builder}
+		c.declareSignatures(true)
+
+		declaredSigs := builder.Signatures()
+
+		expected := []*ssa.Signature{
+			{ID: 0, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}},
+			{ID: 1, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI64, ssa.TypeI32}},
+			{ID: 2, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeF64, ssa.TypeI32}},
+			{ID: 3, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
+			// Before.
+			{ID: 4, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
+			{ID: 5, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32}},
+			{ID: 6, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeF64, ssa.TypeI32}},
+			{ID: 7, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
+			// After.
+			{ID: 8, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
+			{ID: 9, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
+			{ID: 10, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}},
+			{ID: 11, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI64, ssa.TypeI32}},
+			// Misc.
+			{ID: 12, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 13, Params: []ssa.Type{ssa.TypeI64}},
+			{ID: 14, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32, ssa.TypeI32, ssa.TypeI64}, Results: []ssa.Type{ssa.TypeI32}},
+			{ID: 15, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI32}, Results: []ssa.Type{ssa.TypeI64}},
+			{ID: 16, Params: []ssa.Type{ssa.TypeI64, ssa.TypeI64, ssa.TypeI32}},
+		}
+		require.Equal(t, len(expected), len(declaredSigs))
+		for i := 0; i < len(declaredSigs); i++ {
+			require.Equal(t, expected[i].String(), declaredSigs[i].String(), i)
+		}
+	})
 }

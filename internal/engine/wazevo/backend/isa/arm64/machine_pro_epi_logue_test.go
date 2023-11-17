@@ -1,8 +1,6 @@
 package arm64
 
 import (
-	"encoding/hex"
-	"fmt"
 	"testing"
 
 	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
@@ -19,15 +17,29 @@ func TestMachine_SetupPrologue(t *testing.T) {
 		{
 			spillSlotSize: 0,
 			exp: `
-	str x30, [sp, #-0x10]!
+	stp x30, xzr, [sp, #-0x10]!
+	str xzr, [sp, #-0x10]!
+	udf
+`,
+		},
+		{
+			spillSlotSize: 0,
+			abi:           abiImpl{argStackSize: 16, retStackSize: 16},
+			exp: `
+	orr x27, xzr, #0x20
+	sub sp, sp, x27
+	stp x30, x27, [sp, #-0x10]!
+	str xzr, [sp, #-0x10]!
 	udf
 `,
 		},
 		{
 			spillSlotSize: 16,
 			exp: `
-	str x30, [sp, #-0x10]!
+	stp x30, xzr, [sp, #-0x10]!
 	sub sp, sp, #0x10
+	orr x27, xzr, #0x10
+	str x27, [sp, #-0x10]!
 	udf
 `,
 		},
@@ -35,11 +47,13 @@ func TestMachine_SetupPrologue(t *testing.T) {
 			spillSlotSize: 0,
 			clobberedRegs: []regalloc.VReg{v18VReg, v19VReg, x18VReg, x25VReg},
 			exp: `
-	str x30, [sp, #-0x10]!
+	stp x30, xzr, [sp, #-0x10]!
 	str q18, [sp, #-0x10]!
 	str q19, [sp, #-0x10]!
 	str x18, [sp, #-0x10]!
 	str x25, [sp, #-0x10]!
+	orr x27, xzr, #0x40
+	str x27, [sp, #-0x10]!
 	udf
 `,
 		},
@@ -47,19 +61,39 @@ func TestMachine_SetupPrologue(t *testing.T) {
 			spillSlotSize: 320,
 			clobberedRegs: []regalloc.VReg{v18VReg, v19VReg, x18VReg, x25VReg},
 			exp: `
-	str x30, [sp, #-0x10]!
-	sub sp, sp, #0x140
+	stp x30, xzr, [sp, #-0x10]!
 	str q18, [sp, #-0x10]!
 	str q19, [sp, #-0x10]!
 	str x18, [sp, #-0x10]!
 	str x25, [sp, #-0x10]!
+	sub sp, sp, #0x140
+	orr x27, xzr, #0x180
+	str x27, [sp, #-0x10]!
+	udf
+`,
+		},
+		{
+			spillSlotSize: 320,
+			abi:           abiImpl{argStackSize: 320, retStackSize: 160},
+			clobberedRegs: []regalloc.VReg{v18VReg, v19VReg, x18VReg, x25VReg},
+			exp: `
+	orr x27, xzr, #0x1e0
+	sub sp, sp, x27
+	stp x30, x27, [sp, #-0x10]!
+	str q18, [sp, #-0x10]!
+	str q19, [sp, #-0x10]!
+	str x18, [sp, #-0x10]!
+	str x25, [sp, #-0x10]!
+	sub sp, sp, #0x140
+	orr x27, xzr, #0x180
+	str x27, [sp, #-0x10]!
 	udf
 `,
 		},
 	} {
 		tc := tc
 		t.Run(tc.exp, func(t *testing.T) {
-			ctx, _, m := newSetupWithMockContext()
+			_, _, m := newSetupWithMockContext()
 			m.DisableStackCheck()
 			m.spillSlotSize = tc.spillSlotSize
 			m.clobberedRegs = tc.clobberedRegs
@@ -75,8 +109,6 @@ func TestMachine_SetupPrologue(t *testing.T) {
 			m.SetupPrologue()
 			require.Equal(t, root, m.rootInstr)
 			m.Encode()
-			fmt.Println(hex.EncodeToString(ctx.buf))
-			fmt.Println(m.Format())
 			require.Equal(t, tc.exp, m.Format())
 		})
 	}
@@ -85,11 +117,13 @@ func TestMachine_SetupPrologue(t *testing.T) {
 func TestMachine_SetupEpilogue(t *testing.T) {
 	for _, tc := range []struct {
 		exp           string
+		abi           abiImpl
 		clobberedRegs []regalloc.VReg
 		spillSlotSize int64
 	}{
 		{
 			exp: `
+	add sp, sp, #0x10
 	ldr x30, [sp], #0x10
 	ret
 `,
@@ -98,6 +132,7 @@ func TestMachine_SetupEpilogue(t *testing.T) {
 		},
 		{
 			exp: `
+	add sp, sp, #0x10
 	add sp, sp, #0x50
 	ldr x30, [sp], #0x10
 	ret
@@ -107,6 +142,19 @@ func TestMachine_SetupEpilogue(t *testing.T) {
 		},
 		{
 			exp: `
+	add sp, sp, #0x10
+	add sp, sp, #0x50
+	ldr x30, [sp], #0x10
+	add sp, sp, #0x20
+	ret
+`,
+			abi:           abiImpl{argStackSize: 16, retStackSize: 16},
+			spillSlotSize: 16 * 5,
+			clobberedRegs: nil,
+		},
+		{
+			exp: `
+	add sp, sp, #0x10
 	ldr q27, [sp], #0x10
 	ldr q18, [sp], #0x10
 	ldr x30, [sp], #0x10
@@ -116,6 +164,7 @@ func TestMachine_SetupEpilogue(t *testing.T) {
 		},
 		{
 			exp: `
+	add sp, sp, #0x10
 	ldr x25, [sp], #0x10
 	ldr x18, [sp], #0x10
 	ldr q27, [sp], #0x10
@@ -127,23 +176,41 @@ func TestMachine_SetupEpilogue(t *testing.T) {
 		},
 		{
 			exp: `
+	add sp, sp, #0x10
+	add sp, sp, #0xa0
 	ldr x25, [sp], #0x10
 	ldr x18, [sp], #0x10
 	ldr q27, [sp], #0x10
 	ldr q18, [sp], #0x10
-	add sp, sp, #0xa0
 	ldr x30, [sp], #0x10
 	ret
 `,
 			spillSlotSize: 16 * 10,
 			clobberedRegs: []regalloc.VReg{v18VReg, v27VReg, x18VReg, x25VReg},
 		},
+		{
+			exp: `
+	add sp, sp, #0x10
+	add sp, sp, #0xa0
+	ldr x25, [sp], #0x10
+	ldr x18, [sp], #0x10
+	ldr q27, [sp], #0x10
+	ldr q18, [sp], #0x10
+	ldr x30, [sp], #0x10
+	add sp, sp, #0x150
+	ret
+`,
+			spillSlotSize: 16 * 10,
+			abi:           abiImpl{argStackSize: 16, retStackSize: 320},
+			clobberedRegs: []regalloc.VReg{v18VReg, v27VReg, x18VReg, x25VReg},
+		},
 	} {
 		tc := tc
 		t.Run(tc.exp, func(t *testing.T) {
-			ctx, _, m := newSetupWithMockContext()
+			_, _, m := newSetupWithMockContext()
 			m.spillSlotSize = tc.spillSlotSize
 			m.clobberedRegs = tc.clobberedRegs
+			m.currentABI = &tc.abi
 
 			root := m.allocateNop()
 			m.rootInstr = root
@@ -155,8 +222,6 @@ func TestMachine_SetupEpilogue(t *testing.T) {
 
 			require.Equal(t, root, m.rootInstr)
 			m.Encode()
-			fmt.Println(hex.EncodeToString(ctx.buf))
-			fmt.Println(m.Format())
 			require.Equal(t, tc.exp, m.Format())
 		})
 	}
@@ -197,13 +262,11 @@ func TestMachine_insertStackBoundsCheck(t *testing.T) {
 	} {
 		tc := tc
 		t.Run(tc.exp, func(t *testing.T) {
-			ctx, _, m := newSetupWithMockContext()
-			m.rootInstr = m.allocateInstrAfterLowering()
+			_, _, m := newSetupWithMockContext()
+			m.rootInstr = m.allocateInstr()
 			m.rootInstr.asNop0()
 			m.insertStackBoundsCheck(tc.requiredStackSize, m.rootInstr)
-			fmt.Println(m.Format())
 			m.Encode()
-			fmt.Println(hex.EncodeToString(ctx.buf))
 			require.Equal(t, tc.exp, m.Format())
 		})
 	}
@@ -211,8 +274,7 @@ func TestMachine_insertStackBoundsCheck(t *testing.T) {
 
 func TestMachine_CompileStackGrowCallSequence(t *testing.T) {
 	_, _, m := newSetupWithMockContext()
-	src := m.CompileStackGrowCallSequence()
-	fmt.Println(hex.EncodeToString(src))
+	_ = m.CompileStackGrowCallSequence()
 
 	require.Equal(t, `
 	str x1, [x0, #0x60]
@@ -258,7 +320,7 @@ func TestMachine_CompileStackGrowCallSequence(t *testing.T) {
 	str x27, [x0, #0x38]
 	orr w17, wzr, #0x1
 	str w17, [x0]
-	adr x27, #0x1c
+	adr x27, #0x20
 	str x27, [x0, #0x30]
 	exit_sequence x0
 	ldr x1, [x0, #0x60]

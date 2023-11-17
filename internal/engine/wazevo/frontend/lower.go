@@ -47,9 +47,15 @@ func (l *loweringState) String() string {
 	for _, v := range l.values {
 		str = append(str, fmt.Sprintf("v%v", v.ID()))
 	}
-	return fmt.Sprintf("\n\tunreachable=%v(depth=%d), \n\tstack: %s",
+	var frames []string
+	for i := range l.controlFrames {
+		frames = append(frames, l.controlFrames[i].kind.String())
+	}
+	return fmt.Sprintf("\n\tunreachable=%v(depth=%d)\n\tstack: %s\n\tcontrol frames: %s",
 		l.unreachable, l.unreachableDepth,
-		strings.Join(str, ", "))
+		strings.Join(str, ", "),
+		strings.Join(frames, ", "),
+	)
 }
 
 const (
@@ -59,6 +65,24 @@ const (
 	controlFrameKindIfWithoutElse
 	controlFrameKindBlock
 )
+
+// String implements fmt.Stringer for debugging.
+func (k controlFrameKind) String() string {
+	switch k {
+	case controlFrameKindFunction:
+		return "function"
+	case controlFrameKindLoop:
+		return "loop"
+	case controlFrameKindIfWithElse:
+		return "if_with_else"
+	case controlFrameKindIfWithoutElse:
+		return "if_without_else"
+	case controlFrameKindBlock:
+		return "block"
+	default:
+		panic(k)
+	}
+}
 
 // isLoop returns true if this is a loop frame.
 func (ctrl *controlFrame) isLoop() bool {
@@ -130,6 +154,10 @@ func (l *loweringState) ctrlPeekAt(n int) (ret *controlFrame) {
 func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 	c.ssaBuilder.Seal(entryBlk)
 
+	if c.needListener {
+		c.callListenerBefore()
+	}
+
 	// Pushes the empty control frame which corresponds to the function return.
 	c.loweringState.ctrlPush(controlFrame{
 		kind:           controlFrameKindFunction,
@@ -138,15 +166,7 @@ func (c *Compiler) lowerBody(entryBlk ssa.BasicBlock) {
 	})
 
 	for c.loweringState.pc < len(c.wasmFunctionBody) {
-		op := c.wasmFunctionBody[c.loweringState.pc]
-		c.lowerOpcode(op)
-		if wazevoapi.FrontEndLoggingEnabled {
-			fmt.Println("--------- Translated " + wasm.InstructionName(op) + " --------")
-			fmt.Println("state: " + c.loweringState.String())
-			fmt.Println(c.formatBuilder())
-			fmt.Println("--------------------------")
-		}
-		c.loweringState.pc++
+		c.lowerCurrentOpcode()
 	}
 }
 
@@ -154,14 +174,22 @@ func (c *Compiler) state() *loweringState {
 	return &c.loweringState
 }
 
-func (c *Compiler) lowerOpcode(op wasm.Opcode) {
+func (c *Compiler) lowerCurrentOpcode() {
+	op := c.wasmFunctionBody[c.loweringState.pc]
+
+	if c.needSourceOffsetInfo {
+		c.ssaBuilder.SetCurrentSourceOffset(
+			ssa.SourceOffset(c.loweringState.pc) + ssa.SourceOffset(c.wasmFunctionBodyOffsetInCodeSection),
+		)
+	}
+
 	builder := c.ssaBuilder
 	state := c.state()
 	switch op {
 	case wasm.OpcodeI32Const:
 		c := c.readI32s()
 		if state.unreachable {
-			return
+			break
 		}
 
 		iconst := builder.AllocateInstruction().AsIconst32(uint32(c)).Insert(builder)
@@ -170,7 +198,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeI64Const:
 		c := c.readI64s()
 		if state.unreachable {
-			return
+			break
 		}
 		iconst := builder.AllocateInstruction().AsIconst64(uint64(c)).Insert(builder)
 		value := iconst.Return()
@@ -178,7 +206,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeF32Const:
 		f32 := c.readF32()
 		if state.unreachable {
-			return
+			break
 		}
 		f32const := builder.AllocateInstruction().
 			AsF32const(f32).
@@ -188,7 +216,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeF64Const:
 		f64 := c.readF64()
 		if state.unreachable {
-			return
+			break
 		}
 		f64const := builder.AllocateInstruction().
 			AsF64const(f64).
@@ -197,7 +225,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(f64const)
 	case wasm.OpcodeI32Add, wasm.OpcodeI64Add:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		iadd := builder.AllocateInstruction()
@@ -207,7 +235,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Sub, wasm.OpcodeI64Sub:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		isub := builder.AllocateInstruction()
@@ -217,7 +245,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeF32Add, wasm.OpcodeF64Add:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		iadd := builder.AllocateInstruction()
@@ -227,7 +255,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Mul, wasm.OpcodeI64Mul:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		imul := builder.AllocateInstruction()
@@ -237,7 +265,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeF32Sub, wasm.OpcodeF64Sub:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		isub := builder.AllocateInstruction()
@@ -247,7 +275,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeF32Mul, wasm.OpcodeF64Mul:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		isub := builder.AllocateInstruction()
@@ -257,7 +285,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeF32Div, wasm.OpcodeF64Div:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		isub := builder.AllocateInstruction()
@@ -267,7 +295,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeF32Max, wasm.OpcodeF64Max:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		isub := builder.AllocateInstruction()
@@ -277,7 +305,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeF32Min, wasm.OpcodeF64Min:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		isub := builder.AllocateInstruction()
@@ -287,37 +315,37 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI64Extend8S:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIntegerExtend(true, 8, 64)
 	case wasm.OpcodeI64Extend16S:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIntegerExtend(true, 16, 64)
 	case wasm.OpcodeI64Extend32S, wasm.OpcodeI64ExtendI32S:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIntegerExtend(true, 32, 64)
 	case wasm.OpcodeI64ExtendI32U:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIntegerExtend(false, 32, 64)
 	case wasm.OpcodeI32Extend8S:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIntegerExtend(true, 8, 32)
 	case wasm.OpcodeI32Extend16S:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIntegerExtend(true, 16, 32)
 	case wasm.OpcodeI32Eqz, wasm.OpcodeI64Eqz:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		zero := builder.AllocateInstruction()
@@ -334,109 +362,109 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(icmp)
 	case wasm.OpcodeI32Eq, wasm.OpcodeI64Eq:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondEqual)
 	case wasm.OpcodeI32Ne, wasm.OpcodeI64Ne:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondNotEqual)
 	case wasm.OpcodeI32LtS, wasm.OpcodeI64LtS:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondSignedLessThan)
 	case wasm.OpcodeI32LtU, wasm.OpcodeI64LtU:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondUnsignedLessThan)
 	case wasm.OpcodeI32GtS, wasm.OpcodeI64GtS:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondSignedGreaterThan)
 	case wasm.OpcodeI32GtU, wasm.OpcodeI64GtU:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondUnsignedGreaterThan)
 	case wasm.OpcodeI32LeS, wasm.OpcodeI64LeS:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondSignedLessThanOrEqual)
 	case wasm.OpcodeI32LeU, wasm.OpcodeI64LeU:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondUnsignedLessThanOrEqual)
 	case wasm.OpcodeI32GeS, wasm.OpcodeI64GeS:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondSignedGreaterThanOrEqual)
 	case wasm.OpcodeI32GeU, wasm.OpcodeI64GeU:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertIcmp(ssa.IntegerCmpCondUnsignedGreaterThanOrEqual)
 
 	case wasm.OpcodeF32Eq, wasm.OpcodeF64Eq:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertFcmp(ssa.FloatCmpCondEqual)
 	case wasm.OpcodeF32Ne, wasm.OpcodeF64Ne:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertFcmp(ssa.FloatCmpCondNotEqual)
 	case wasm.OpcodeF32Lt, wasm.OpcodeF64Lt:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertFcmp(ssa.FloatCmpCondLessThan)
 	case wasm.OpcodeF32Gt, wasm.OpcodeF64Gt:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertFcmp(ssa.FloatCmpCondGreaterThan)
 	case wasm.OpcodeF32Le, wasm.OpcodeF64Le:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertFcmp(ssa.FloatCmpCondLessThanOrEqual)
 	case wasm.OpcodeF32Ge, wasm.OpcodeF64Ge:
 		if state.unreachable {
-			return
+			break
 		}
 		c.insertFcmp(ssa.FloatCmpCondGreaterThanOrEqual)
 	case wasm.OpcodeF32Neg, wasm.OpcodeF64Neg:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		v := builder.AllocateInstruction().AsFneg(x).Insert(builder).Return()
 		state.push(v)
 	case wasm.OpcodeF32Sqrt, wasm.OpcodeF64Sqrt:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		v := builder.AllocateInstruction().AsSqrt(x).Insert(builder).Return()
 		state.push(v)
 	case wasm.OpcodeF32Abs, wasm.OpcodeF64Abs:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		v := builder.AllocateInstruction().AsFabs(x).Insert(builder).Return()
 		state.push(v)
 	case wasm.OpcodeF32Copysign, wasm.OpcodeF64Copysign:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		v := builder.AllocateInstruction().AsFcopysign(x, y).Insert(builder).Return()
@@ -444,28 +472,28 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeF32Ceil, wasm.OpcodeF64Ceil:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		v := builder.AllocateInstruction().AsCeil(x).Insert(builder).Return()
 		state.push(v)
 	case wasm.OpcodeF32Floor, wasm.OpcodeF64Floor:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		v := builder.AllocateInstruction().AsFloor(x).Insert(builder).Return()
 		state.push(v)
 	case wasm.OpcodeF32Trunc, wasm.OpcodeF64Trunc:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		v := builder.AllocateInstruction().AsTrunc(x).Insert(builder).Return()
 		state.push(v)
 	case wasm.OpcodeF32Nearest, wasm.OpcodeF64Nearest:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		v := builder.AllocateInstruction().AsNearest(x).Insert(builder).Return()
@@ -475,18 +503,384 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		wasm.OpcodeI64TruncF64U, wasm.OpcodeI64TruncF32U,
 		wasm.OpcodeI32TruncF64U, wasm.OpcodeI32TruncF32U:
 		if state.unreachable {
-			return
+			break
 		}
 		ret := builder.AllocateInstruction().AsFcvtToInt(
 			state.pop(),
 			c.execCtxPtrValue,
 			op == wasm.OpcodeI64TruncF64S || op == wasm.OpcodeI64TruncF32S || op == wasm.OpcodeI32TruncF32S || op == wasm.OpcodeI32TruncF64S,
 			op == wasm.OpcodeI64TruncF64S || op == wasm.OpcodeI64TruncF32S || op == wasm.OpcodeI64TruncF64U || op == wasm.OpcodeI64TruncF32U,
+			false,
 		).Insert(builder).Return()
 		state.push(ret)
+	case wasm.OpcodeMiscPrefix:
+		state.pc++
+		// A misc opcode is encoded as an unsigned variable 32-bit integer.
+		miscOpUint, num, err := leb128.LoadUint32(c.wasmFunctionBody[state.pc:])
+		if err != nil {
+			// In normal conditions this should never happen because the function has passed validation.
+			panic(fmt.Sprintf("failed to read misc opcode: %v", err))
+		}
+		state.pc += int(num - 1)
+		miscOp := wasm.OpcodeMisc(miscOpUint)
+		switch miscOp {
+		case wasm.OpcodeMiscI64TruncSatF64S, wasm.OpcodeMiscI64TruncSatF32S,
+			wasm.OpcodeMiscI32TruncSatF64S, wasm.OpcodeMiscI32TruncSatF32S,
+			wasm.OpcodeMiscI64TruncSatF64U, wasm.OpcodeMiscI64TruncSatF32U,
+			wasm.OpcodeMiscI32TruncSatF64U, wasm.OpcodeMiscI32TruncSatF32U:
+			if state.unreachable {
+				break
+			}
+			ret := builder.AllocateInstruction().AsFcvtToInt(
+				state.pop(),
+				c.execCtxPtrValue,
+				miscOp == wasm.OpcodeMiscI64TruncSatF64S || miscOp == wasm.OpcodeMiscI64TruncSatF32S || miscOp == wasm.OpcodeMiscI32TruncSatF32S || miscOp == wasm.OpcodeMiscI32TruncSatF64S,
+				miscOp == wasm.OpcodeMiscI64TruncSatF64S || miscOp == wasm.OpcodeMiscI64TruncSatF32S || miscOp == wasm.OpcodeMiscI64TruncSatF64U || miscOp == wasm.OpcodeMiscI64TruncSatF32U,
+				true,
+			).Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeMiscTableSize:
+			tableIndex := c.readI32u()
+			if state.unreachable {
+				break
+			}
+
+			// Load the table.
+			loadTableInstancePtr := builder.AllocateInstruction()
+			loadTableInstancePtr.AsLoad(c.moduleCtxPtrValue, c.offset.TableOffset(int(tableIndex)).U32(), ssa.TypeI64)
+			builder.InsertInstruction(loadTableInstancePtr)
+			tableInstancePtr := loadTableInstancePtr.Return()
+
+			// Load the table's length.
+			loadTableLen := builder.AllocateInstruction().
+				AsLoad(tableInstancePtr, tableInstanceLenOffset, ssa.TypeI32).
+				Insert(builder)
+			state.push(loadTableLen.Return())
+
+		case wasm.OpcodeMiscTableGrow:
+			tableIndex := c.readI32u()
+			if state.unreachable {
+				break
+			}
+
+			c.storeCallerModuleContext()
+
+			tableIndexVal := builder.AllocateInstruction().AsIconst32(tableIndex).Insert(builder).Return()
+
+			num := state.pop()
+			r := state.pop()
+
+			tableGrowPtr := builder.AllocateInstruction().
+				AsLoad(c.execCtxPtrValue,
+					wazevoapi.ExecutionContextOffsetTableGrowTrampolineAddress.U32(),
+					ssa.TypeI64,
+				).Insert(builder).Return()
+
+			// TODO: reuse the slice.
+			args := []ssa.Value{c.execCtxPtrValue, tableIndexVal, num, r}
+			callGrowRet := builder.
+				AllocateInstruction().
+				AsCallIndirect(tableGrowPtr, &c.tableGrowSig, args).
+				Insert(builder).Return()
+			state.push(callGrowRet)
+
+		case wasm.OpcodeMiscTableCopy:
+			dstTableIndex := c.readI32u()
+			srcTableIndex := c.readI32u()
+			if state.unreachable {
+				break
+			}
+
+			copySize := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+			srcOffset := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+			dstOffset := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+
+			// Out of bounds check.
+			dstTableInstancePtr := c.boundsCheckInTable(dstTableIndex, dstOffset, copySize)
+			srcTableInstancePtr := c.boundsCheckInTable(srcTableIndex, srcOffset, copySize)
+
+			dstTableBaseAddr := c.loadTableBaseAddr(dstTableInstancePtr)
+			srcTableBaseAddr := c.loadTableBaseAddr(srcTableInstancePtr)
+
+			three := builder.AllocateInstruction().AsIconst64(3).Insert(builder).Return()
+
+			dstOffsetInBytes := builder.AllocateInstruction().AsIshl(dstOffset, three).Insert(builder).Return()
+			dstAddr := builder.AllocateInstruction().AsIadd(dstTableBaseAddr, dstOffsetInBytes).Insert(builder).Return()
+			srcOffsetInBytes := builder.AllocateInstruction().AsIshl(srcOffset, three).Insert(builder).Return()
+			srcAddr := builder.AllocateInstruction().AsIadd(srcTableBaseAddr, srcOffsetInBytes).Insert(builder).Return()
+
+			copySizeInBytes := builder.AllocateInstruction().AsIshl(copySize, three).Insert(builder).Return()
+			c.callMemmove(dstAddr, srcAddr, copySizeInBytes)
+
+		case wasm.OpcodeMiscMemoryCopy:
+			state.pc += 2 // +2 to skip two memory indexes which are fixed to zero.
+			if state.unreachable {
+				break
+			}
+
+			copySize := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+			srcOffset := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+			dstOffset := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+
+			// Out of bounds check.
+			memLen := c.getMemoryLenValue(false)
+			c.boundsCheckInMemory(memLen, dstOffset, copySize)
+			c.boundsCheckInMemory(memLen, srcOffset, copySize)
+
+			memBase := c.getMemoryBaseValue(false)
+			dstAddr := builder.AllocateInstruction().AsIadd(memBase, dstOffset).Insert(builder).Return()
+			srcAddr := builder.AllocateInstruction().AsIadd(memBase, srcOffset).Insert(builder).Return()
+
+			c.callMemmove(dstAddr, srcAddr, copySize)
+
+		case wasm.OpcodeMiscTableFill:
+			tableIndex := c.readI32u()
+			if state.unreachable {
+				break
+			}
+			fillSize := state.pop()
+			value := state.pop()
+			offset := state.pop()
+
+			fillSizeExt := builder.
+				AllocateInstruction().AsUExtend(fillSize, 32, 64).Insert(builder).Return()
+			offsetExt := builder.
+				AllocateInstruction().AsUExtend(offset, 32, 64).Insert(builder).Return()
+			tableInstancePtr := c.boundsCheckInTable(tableIndex, offsetExt, fillSizeExt)
+
+			three := builder.AllocateInstruction().AsIconst64(3).Insert(builder).Return()
+			offsetInBytes := builder.AllocateInstruction().AsIshl(offsetExt, three).Insert(builder).Return()
+			fillSizeInBytes := builder.AllocateInstruction().AsIshl(fillSizeExt, three).Insert(builder).Return()
+
+			// Calculate the base address of the table.
+			tableBaseAddr := c.loadTableBaseAddr(tableInstancePtr)
+			addr := builder.AllocateInstruction().AsIadd(tableBaseAddr, offsetInBytes).Insert(builder).Return()
+
+			// Prepare the loop and following block.
+			beforeLoop := builder.AllocateBasicBlock()
+			loopBlk := builder.AllocateBasicBlock()
+			loopVar := loopBlk.AddParam(builder, ssa.TypeI64)
+			followingBlk := builder.AllocateBasicBlock()
+
+			// Uses the copy trick for faster filling buffer like memory.fill, but in this case we copy 8 bytes at a time.
+			// 	buf := memoryInst.Buffer[offset : offset+fillSize]
+			// 	buf[0:8] = value
+			// 	for i := 8; i < fillSize; i *= 2 { Begin with 8 bytes.
+			// 		copy(buf[i:], buf[:i])
+			// 	}
+
+			// Insert the jump to the beforeLoop block; If the fillSize is zero, then jump to the following block to skip entire logics.
+			zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
+			ifFillSizeZero := builder.AllocateInstruction().AsIcmp(fillSizeExt, zero, ssa.IntegerCmpCondEqual).
+				Insert(builder).Return()
+			builder.AllocateInstruction().AsBrnz(ifFillSizeZero, nil, followingBlk).Insert(builder)
+			c.insertJumpToBlock(nil, beforeLoop)
+
+			// buf[0:8] = value
+			builder.SetCurrentBlock(beforeLoop)
+			builder.AllocateInstruction().AsStore(ssa.OpcodeStore, value, addr, 0).Insert(builder)
+			initValue := builder.AllocateInstruction().AsIconst64(8).Insert(builder).Return()
+			c.insertJumpToBlock([]ssa.Value{initValue}, loopBlk) // TODO: reuse the slice.
+
+			builder.SetCurrentBlock(loopBlk)
+			dstAddr := builder.AllocateInstruction().AsIadd(addr, loopVar).Insert(builder).Return()
+
+			// If loopVar*2 > fillSizeInBytes, then count must be fillSizeInBytes-loopVar.
+			var count ssa.Value
+			{
+				loopVarDoubled := builder.AllocateInstruction().AsIadd(loopVar, loopVar).Insert(builder).Return()
+				loopVarDoubledLargerThanFillSize := builder.
+					AllocateInstruction().AsIcmp(loopVarDoubled, fillSizeInBytes, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).
+					Insert(builder).Return()
+				diff := builder.AllocateInstruction().AsIsub(fillSizeInBytes, loopVar).Insert(builder).Return()
+				count = builder.AllocateInstruction().AsSelect(loopVarDoubledLargerThanFillSize, diff, loopVar).Insert(builder).Return()
+			}
+
+			c.callMemmove(dstAddr, addr, count)
+
+			shiftAmount := builder.AllocateInstruction().AsIconst64(1).Insert(builder).Return()
+			newLoopVar := builder.AllocateInstruction().AsIshl(loopVar, shiftAmount).Insert(builder).Return()
+			loopVarLessThanFillSize := builder.AllocateInstruction().
+				AsIcmp(newLoopVar, fillSizeInBytes, ssa.IntegerCmpCondUnsignedLessThan).Insert(builder).Return()
+
+			builder.AllocateInstruction().
+				AsBrnz(loopVarLessThanFillSize, []ssa.Value{newLoopVar}, loopBlk). // TODO: reuse the slice.
+				Insert(builder)
+
+			c.insertJumpToBlock(nil, followingBlk)
+			builder.SetCurrentBlock(followingBlk)
+
+			builder.Seal(beforeLoop)
+			builder.Seal(loopBlk)
+			builder.Seal(followingBlk)
+
+		case wasm.OpcodeMiscMemoryFill:
+			state.pc++ // Skip the memory index which is fixed to zero.
+			if state.unreachable {
+				break
+			}
+
+			fillSize := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+			value := state.pop()
+			offset := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+
+			// Out of bounds check.
+			c.boundsCheckInMemory(c.getMemoryLenValue(false), offset, fillSize)
+
+			// Calculate the base address:
+			addr := builder.AllocateInstruction().AsIadd(c.getMemoryBaseValue(false), offset).Insert(builder).Return()
+
+			// Uses the copy trick for faster filling buffer: https://gist.github.com/taylorza/df2f89d5f9ab3ffd06865062a4cf015d
+			// 	buf := memoryInst.Buffer[offset : offset+fillSize]
+			// 	buf[0] = value
+			// 	for i := 1; i < fillSize; i *= 2 {
+			// 		copy(buf[i:], buf[:i])
+			// 	}
+
+			// Prepare the loop and following block.
+			beforeLoop := builder.AllocateBasicBlock()
+			loopBlk := builder.AllocateBasicBlock()
+			loopVar := loopBlk.AddParam(builder, ssa.TypeI64)
+			followingBlk := builder.AllocateBasicBlock()
+
+			// Insert the jump to the beforeLoop block; If the fillSize is zero, then jump to the following block to skip entire logics.
+			zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
+			ifFillSizeZero := builder.AllocateInstruction().AsIcmp(fillSize, zero, ssa.IntegerCmpCondEqual).
+				Insert(builder).Return()
+			builder.AllocateInstruction().AsBrnz(ifFillSizeZero, nil, followingBlk).Insert(builder)
+			c.insertJumpToBlock(nil, beforeLoop)
+
+			// buf[0] = value
+			builder.SetCurrentBlock(beforeLoop)
+			builder.AllocateInstruction().AsStore(ssa.OpcodeIstore8, value, addr, 0).Insert(builder)
+			initValue := builder.AllocateInstruction().AsIconst64(1).Insert(builder).Return()
+			c.insertJumpToBlock([]ssa.Value{initValue}, loopBlk) // TODO: reuse the slice.
+
+			builder.SetCurrentBlock(loopBlk)
+			dstAddr := builder.AllocateInstruction().AsIadd(addr, loopVar).Insert(builder).Return()
+
+			// If loopVar*2 > fillSizeExt, then count must be fillSizeExt-loopVar.
+			var count ssa.Value
+			{
+				loopVarDoubled := builder.AllocateInstruction().AsIadd(loopVar, loopVar).Insert(builder).Return()
+				loopVarDoubledLargerThanFillSize := builder.
+					AllocateInstruction().AsIcmp(loopVarDoubled, fillSize, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual).
+					Insert(builder).Return()
+				diff := builder.AllocateInstruction().AsIsub(fillSize, loopVar).Insert(builder).Return()
+				count = builder.AllocateInstruction().AsSelect(loopVarDoubledLargerThanFillSize, diff, loopVar).Insert(builder).Return()
+			}
+
+			c.callMemmove(dstAddr, addr, count)
+
+			shiftAmount := builder.AllocateInstruction().AsIconst64(1).Insert(builder).Return()
+			newLoopVar := builder.AllocateInstruction().AsIshl(loopVar, shiftAmount).Insert(builder).Return()
+			loopVarLessThanFillSize := builder.AllocateInstruction().
+				AsIcmp(newLoopVar, fillSize, ssa.IntegerCmpCondUnsignedLessThan).Insert(builder).Return()
+
+			builder.AllocateInstruction().
+				AsBrnz(loopVarLessThanFillSize, []ssa.Value{newLoopVar}, loopBlk). // TODO: reuse the slice.
+				Insert(builder)
+
+			c.insertJumpToBlock(nil, followingBlk)
+			builder.SetCurrentBlock(followingBlk)
+
+			builder.Seal(beforeLoop)
+			builder.Seal(loopBlk)
+			builder.Seal(followingBlk)
+
+		case wasm.OpcodeMiscMemoryInit:
+			index := c.readI32u()
+			state.pc++ // Skip the memory index which is fixed to zero.
+			if state.unreachable {
+				break
+			}
+
+			copySize := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+			offsetInDataInstance := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+			offsetInMemory := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+
+			dataInstPtr := c.dataOrElementInstanceAddr(index, c.offset.DataInstances1stElement)
+
+			// Bounds check.
+			c.boundsCheckInMemory(c.getMemoryLenValue(false), offsetInMemory, copySize)
+			c.boundsCheckInDataOrElementInstance(dataInstPtr, offsetInDataInstance, copySize, wazevoapi.ExitCodeMemoryOutOfBounds)
+
+			dataInstBaseAddr := builder.AllocateInstruction().AsLoad(dataInstPtr, 0, ssa.TypeI64).Insert(builder).Return()
+			srcAddr := builder.AllocateInstruction().AsIadd(dataInstBaseAddr, offsetInDataInstance).Insert(builder).Return()
+
+			memBase := c.getMemoryBaseValue(false)
+			dstAddr := builder.AllocateInstruction().AsIadd(memBase, offsetInMemory).Insert(builder).Return()
+
+			c.callMemmove(dstAddr, srcAddr, copySize)
+
+		case wasm.OpcodeMiscTableInit:
+			elemIndex := c.readI32u()
+			tableIndex := c.readI32u()
+			if state.unreachable {
+				break
+			}
+
+			copySize := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+			offsetInElementInstance := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+			offsetInTable := builder.
+				AllocateInstruction().AsUExtend(state.pop(), 32, 64).Insert(builder).Return()
+
+			elemInstPtr := c.dataOrElementInstanceAddr(elemIndex, c.offset.ElementInstances1stElement)
+
+			// Bounds check.
+			tableInstancePtr := c.boundsCheckInTable(tableIndex, offsetInTable, copySize)
+			c.boundsCheckInDataOrElementInstance(elemInstPtr, offsetInElementInstance, copySize, wazevoapi.ExitCodeTableOutOfBounds)
+
+			three := builder.AllocateInstruction().AsIconst64(3).Insert(builder).Return()
+			// Calculates the destination address in the table.
+			tableOffsetInBytes := builder.AllocateInstruction().AsIshl(offsetInTable, three).Insert(builder).Return()
+			tableBaseAddr := c.loadTableBaseAddr(tableInstancePtr)
+			dstAddr := builder.AllocateInstruction().AsIadd(tableBaseAddr, tableOffsetInBytes).Insert(builder).Return()
+
+			// Calculates the source address in the element instance.
+			srcOffsetInBytes := builder.AllocateInstruction().AsIshl(offsetInElementInstance, three).Insert(builder).Return()
+			elemInstBaseAddr := builder.AllocateInstruction().AsLoad(elemInstPtr, 0, ssa.TypeI64).Insert(builder).Return()
+			srcAddr := builder.AllocateInstruction().AsIadd(elemInstBaseAddr, srcOffsetInBytes).Insert(builder).Return()
+
+			copySizeInBytes := builder.AllocateInstruction().AsIshl(copySize, three).Insert(builder).Return()
+			c.callMemmove(dstAddr, srcAddr, copySizeInBytes)
+
+		case wasm.OpcodeMiscElemDrop:
+			index := c.readI32u()
+			if state.unreachable {
+				break
+			}
+
+			c.dropDataOrElementInstance(index, c.offset.ElementInstances1stElement)
+
+		case wasm.OpcodeMiscDataDrop:
+			index := c.readI32u()
+			if state.unreachable {
+				break
+			}
+			c.dropDataOrElementInstance(index, c.offset.DataInstances1stElement)
+
+		default:
+			panic("Unknown MiscOp " + wasm.MiscInstructionName(miscOp))
+		}
+
 	case wasm.OpcodeI32ReinterpretF32:
 		if state.unreachable {
-			return
+			break
 		}
 		reinterpret := builder.AllocateInstruction().
 			AsBitcast(state.pop(), ssa.TypeI32).
@@ -495,7 +889,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeI64ReinterpretF64:
 		if state.unreachable {
-			return
+			break
 		}
 		reinterpret := builder.AllocateInstruction().
 			AsBitcast(state.pop(), ssa.TypeI64).
@@ -504,7 +898,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeF32ReinterpretI32:
 		if state.unreachable {
-			return
+			break
 		}
 		reinterpret := builder.AllocateInstruction().
 			AsBitcast(state.pop(), ssa.TypeF32).
@@ -513,7 +907,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeF64ReinterpretI64:
 		if state.unreachable {
-			return
+			break
 		}
 		reinterpret := builder.AllocateInstruction().
 			AsBitcast(state.pop(), ssa.TypeF64).
@@ -522,7 +916,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeI32DivS, wasm.OpcodeI64DivS:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		result := builder.AllocateInstruction().AsSDiv(x, y, c.execCtxPtrValue).Insert(builder).Return()
@@ -530,7 +924,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeI32DivU, wasm.OpcodeI64DivU:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		result := builder.AllocateInstruction().AsUDiv(x, y, c.execCtxPtrValue).Insert(builder).Return()
@@ -538,7 +932,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeI32RemS, wasm.OpcodeI64RemS:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		result := builder.AllocateInstruction().AsSRem(x, y, c.execCtxPtrValue).Insert(builder).Return()
@@ -546,7 +940,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeI32RemU, wasm.OpcodeI64RemU:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		result := builder.AllocateInstruction().AsURem(x, y, c.execCtxPtrValue).Insert(builder).Return()
@@ -554,7 +948,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeI32And, wasm.OpcodeI64And:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		and := builder.AllocateInstruction()
@@ -564,7 +958,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Or, wasm.OpcodeI64Or:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		or := builder.AllocateInstruction()
@@ -574,7 +968,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Xor, wasm.OpcodeI64Xor:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		xor := builder.AllocateInstruction()
@@ -584,7 +978,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Shl, wasm.OpcodeI64Shl:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		ishl := builder.AllocateInstruction()
@@ -594,7 +988,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32ShrU, wasm.OpcodeI64ShrU:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		ishl := builder.AllocateInstruction()
@@ -604,7 +998,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32ShrS, wasm.OpcodeI64ShrS:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		ishl := builder.AllocateInstruction()
@@ -614,7 +1008,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Rotl, wasm.OpcodeI64Rotl:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		rotl := builder.AllocateInstruction()
@@ -624,7 +1018,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Rotr, wasm.OpcodeI64Rotr:
 		if state.unreachable {
-			return
+			break
 		}
 		y, x := state.pop(), state.pop()
 		rotr := builder.AllocateInstruction()
@@ -634,7 +1028,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Clz, wasm.OpcodeI64Clz:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		clz := builder.AllocateInstruction()
@@ -644,7 +1038,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Ctz, wasm.OpcodeI64Ctz:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		ctz := builder.AllocateInstruction()
@@ -654,7 +1048,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(value)
 	case wasm.OpcodeI32Popcnt, wasm.OpcodeI64Popcnt:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		popcnt := builder.AllocateInstruction()
@@ -665,7 +1059,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeI32WrapI64:
 		if state.unreachable {
-			return
+			break
 		}
 		x := state.pop()
 		wrap := builder.AllocateInstruction().AsIreduce(x, ssa.TypeI32).Insert(builder).Return()
@@ -673,21 +1067,21 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeGlobalGet:
 		index := c.readI32u()
 		if state.unreachable {
-			return
+			break
 		}
 		v := c.getWasmGlobalValue(index, false)
 		state.push(v)
 	case wasm.OpcodeGlobalSet:
 		index := c.readI32u()
 		if state.unreachable {
-			return
+			break
 		}
 		v := state.pop()
 		c.setWasmGlobalValue(index, v)
 	case wasm.OpcodeLocalGet:
 		index := c.readI32u()
 		if state.unreachable {
-			return
+			break
 		}
 		variable := c.localVariable(index)
 		v := builder.MustFindValue(variable)
@@ -695,7 +1089,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeLocalSet:
 		index := c.readI32u()
 		if state.unreachable {
-			return
+			break
 		}
 		variable := c.localVariable(index)
 		newValue := state.pop()
@@ -704,7 +1098,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeLocalTee:
 		index := c.readI32u()
 		if state.unreachable {
-			return
+			break
 		}
 		variable := c.localVariable(index)
 		newValue := state.peek()
@@ -716,7 +1110,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		}
 
 		if state.unreachable {
-			return
+			break
 		}
 
 		cond := state.pop()
@@ -732,7 +1126,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeMemorySize:
 		state.pc++ // skips the memory index.
 		if state.unreachable {
-			return
+			break
 		}
 
 		var memSizeInBytes ssa.Value
@@ -743,7 +1137,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 				Return()
 
 			memSizeInBytes = builder.AllocateInstruction().
-				AsLoad(memInstPtr, memoryInstanceBufSizeOffset, ssa.TypeI64).
+				AsLoad(memInstPtr, memoryInstanceBufSizeOffset, ssa.TypeI32).
 				Insert(builder).
 				Return()
 		} else {
@@ -765,15 +1159,15 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeMemoryGrow:
 		state.pc++ // skips the memory index.
 		if state.unreachable {
-			return
+			break
 		}
 
 		c.storeCallerModuleContext()
 
 		pages := state.pop()
-		loadPtr := builder.AllocateInstruction().
+		memoryGrowPtr := builder.AllocateInstruction().
 			AsLoad(c.execCtxPtrValue,
-				wazevoapi.ExecutionContextOffsets.MemoryGrowTrampolineAddress.U32(),
+				wazevoapi.ExecutionContextOffsetMemoryGrowTrampolineAddress.U32(),
 				ssa.TypeI64,
 			).Insert(builder).Return()
 
@@ -782,7 +1176,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 		callGrowRet := builder.
 			AllocateInstruction().
-			AsCallIndirect(loadPtr, &c.memoryGrowSig, args).
+			AsCallIndirect(memoryGrowPtr, &c.memoryGrowSig, args).
 			Insert(builder).Return()
 		state.push(callGrowRet)
 
@@ -801,9 +1195,8 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 		_, offset := c.readMemArg()
 		if state.unreachable {
-			return
+			break
 		}
-
 		var opSize uint64
 		var opcode ssa.Opcode
 		switch op {
@@ -849,7 +1242,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		wasm.OpcodeI64Load32U:
 		_, offset := c.readMemArg()
 		if state.unreachable {
-			return
+			break
 		}
 
 		var opSize uint64
@@ -917,7 +1310,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 		if state.unreachable {
 			state.unreachableDepth++
-			return
+			break
 		}
 
 		followingBlk := builder.AllocateBasicBlock()
@@ -934,7 +1327,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 		if state.unreachable {
 			state.unreachableDepth++
-			return
+			break
 		}
 
 		loopHeader, afterLoopBlock := builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
@@ -962,12 +1355,25 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 		c.switchTo(originalLen, loopHeader)
 
+		if c.ensureTermination {
+			checkModuleExitCodePtr := builder.AllocateInstruction().
+				AsLoad(c.execCtxPtrValue,
+					wazevoapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(),
+					ssa.TypeI64,
+				).Insert(builder).Return()
+
+			c.checkModuleExitCodeArg[0] = c.execCtxPtrValue
+
+			builder.AllocateInstruction().
+				AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig, c.checkModuleExitCodeArg[:]).
+				Insert(builder)
+		}
 	case wasm.OpcodeIf:
 		bt := c.readBlockType()
 
 		if state.unreachable {
 			state.unreachableDepth++
-			return
+			break
 		}
 
 		v := state.pop()
@@ -982,7 +1388,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 		var args []ssa.Value
 		if len(bt.Params) > 0 {
-			args = cloneValuesList(state.values[len(state.values)-1-len(bt.Params):])
+			args = cloneValuesList(state.values[len(state.values)-len(bt.Params):])
 		}
 
 		// Insert the conditional jump to the Else block.
@@ -1011,14 +1417,13 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		builder.Seal(elseBlk)
 	case wasm.OpcodeElse:
 		ifctrl := state.ctrlPeekAt(0)
-		ifctrl.kind = controlFrameKindIfWithElse
-
 		if unreachable := state.unreachable; unreachable && state.unreachableDepth > 0 {
 			// If it is currently in unreachable and is a nested if,
 			// we just remove the entire else block.
-			return
+			break
 		}
 
+		ifctrl.kind = controlFrameKindIfWithElse
 		if !state.unreachable {
 			// If this Then block is currently reachable, we have to insert the branching to the following BB.
 			followingBlk := ifctrl.followingBlock // == the BB after if-then-else.
@@ -1040,7 +1445,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeEnd:
 		if state.unreachableDepth > 0 {
 			state.unreachableDepth--
-			return
+			break
 		}
 
 		ctrl := state.ctrlPop()
@@ -1059,7 +1464,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 		switch ctrl.kind {
 		case controlFrameKindFunction:
-			return // This is the very end of function.
+			break // This is the very end of function.
 		case controlFrameKindLoop:
 			// Loop header block can be reached from any br/br_table contained in the loop,
 			// so now that we've reached End of it, we can seal it.
@@ -1068,7 +1473,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 			// If this is the end of Then block, we have to emit the empty Else block.
 			elseBlk := ctrl.blk
 			builder.SetCurrentBlock(elseBlk)
-			c.insertJumpToBlock(nil, followingBlk)
+			c.insertJumpToBlock(ctrl.clonedArgs, followingBlk)
 		}
 
 		builder.Seal(ctrl.followingBlock)
@@ -1079,7 +1484,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeBr:
 		labelIndex := c.readI32u()
 		if state.unreachable {
-			return
+			break
 		}
 
 		targetBlk, argNum := state.brTargetArgNumFor(labelIndex)
@@ -1091,7 +1496,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeBrIf:
 		labelIndex := c.readI32u()
 		if state.unreachable {
-			return
+			break
 		}
 
 		v := state.pop()
@@ -1121,7 +1526,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		}
 		labels = append(labels, c.readI32u()) // default label.
 		if state.unreachable {
-			return
+			break
 		}
 
 		index := state.pop()
@@ -1137,8 +1542,12 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 	case wasm.OpcodeNop:
 	case wasm.OpcodeReturn:
 		if state.unreachable {
-			return
+			break
 		}
+		if c.needListener {
+			c.callListenerAfter()
+		}
+
 		results := c.loweringState.nPeekDup(c.results())
 		instr := builder.AllocateInstruction()
 
@@ -1148,7 +1557,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeUnreachable:
 		if state.unreachable {
-			return
+			break
 		}
 		exit := builder.AllocateInstruction()
 		exit.AsExitWithCode(c.execCtxPtrValue, wazevoapi.ExitCodeUnreachable)
@@ -1159,14 +1568,14 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		typeIndex := c.readI32u()
 		tableIndex := c.readI32u()
 		if state.unreachable {
-			return
+			break
 		}
 		c.lowerCallIndirect(typeIndex, tableIndex)
 
 	case wasm.OpcodeCall:
 		fnIndex := c.readI32u()
 		if state.unreachable {
-			return
+			break
 		}
 
 		// Before transfer the control to the callee, we have to store the current module's moduleContextPtr
@@ -1233,12 +1642,12 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 
 	case wasm.OpcodeDrop:
 		if state.unreachable {
-			return
+			break
 		}
 		_ = state.pop()
 	case wasm.OpcodeF64ConvertI32S, wasm.OpcodeF64ConvertI64S, wasm.OpcodeF64ConvertI32U, wasm.OpcodeF64ConvertI64U:
 		if state.unreachable {
-			return
+			break
 		}
 		result := builder.AllocateInstruction().AsFcvtFromInt(
 			state.pop(),
@@ -1248,7 +1657,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(result)
 	case wasm.OpcodeF32ConvertI32S, wasm.OpcodeF32ConvertI64S, wasm.OpcodeF32ConvertI32U, wasm.OpcodeF32ConvertI64U:
 		if state.unreachable {
-			return
+			break
 		}
 		result := builder.AllocateInstruction().AsFcvtFromInt(
 			state.pop(),
@@ -1258,7 +1667,7 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(result)
 	case wasm.OpcodeF32DemoteF64:
 		if state.unreachable {
-			return
+			break
 		}
 		cvt := builder.AllocateInstruction()
 		cvt.AsFdemote(state.pop())
@@ -1266,15 +1675,1561 @@ func (c *Compiler) lowerOpcode(op wasm.Opcode) {
 		state.push(cvt.Return())
 	case wasm.OpcodeF64PromoteF32:
 		if state.unreachable {
-			return
+			break
 		}
 		cvt := builder.AllocateInstruction()
 		cvt.AsFpromote(state.pop())
 		builder.InsertInstruction(cvt)
 		state.push(cvt.Return())
+
+	case wasm.OpcodeVecPrefix:
+		state.pc++
+		vecOp := c.wasmFunctionBody[state.pc]
+		switch vecOp {
+		case wasm.OpcodeVecV128Const:
+			state.pc++
+			lo := binary.LittleEndian.Uint64(c.wasmFunctionBody[state.pc:])
+			state.pc += 8
+			hi := binary.LittleEndian.Uint64(c.wasmFunctionBody[state.pc:])
+			state.pc += 7
+			if state.unreachable {
+				break
+			}
+			ret := builder.AllocateInstruction().AsVconst(lo, hi).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128Load:
+			_, offset := c.readMemArg()
+			if state.unreachable {
+				break
+			}
+			baseAddr := state.pop()
+			addr := c.memOpSetup(baseAddr, uint64(offset), 16)
+			load := builder.AllocateInstruction()
+			load.AsLoad(addr, offset, ssa.TypeV128)
+			builder.InsertInstruction(load)
+			state.push(load.Return())
+		case wasm.OpcodeVecV128Load8Lane, wasm.OpcodeVecV128Load16Lane, wasm.OpcodeVecV128Load32Lane:
+			_, offset := c.readMemArg()
+			state.pc++
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			var loadOp ssa.Opcode
+			var opSize uint64
+			switch vecOp {
+			case wasm.OpcodeVecV128Load8Lane:
+				loadOp, lane, opSize = ssa.OpcodeUload8, ssa.VecLaneI8x16, 1
+			case wasm.OpcodeVecV128Load16Lane:
+				loadOp, lane, opSize = ssa.OpcodeUload16, ssa.VecLaneI16x8, 2
+			case wasm.OpcodeVecV128Load32Lane:
+				loadOp, lane, opSize = ssa.OpcodeUload32, ssa.VecLaneI32x4, 4
+			}
+			laneIndex := c.wasmFunctionBody[state.pc]
+			vector := state.pop()
+			baseAddr := state.pop()
+			addr := c.memOpSetup(baseAddr, uint64(offset), opSize)
+			load := builder.AllocateInstruction().
+				AsExtLoad(loadOp, addr, offset, false).
+				Insert(builder).Return()
+			ret := builder.AllocateInstruction().
+				AsInsertlane(vector, load, laneIndex, lane).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128Load64Lane:
+			_, offset := c.readMemArg()
+			state.pc++
+			if state.unreachable {
+				break
+			}
+			laneIndex := c.wasmFunctionBody[state.pc]
+			vector := state.pop()
+			baseAddr := state.pop()
+			addr := c.memOpSetup(baseAddr, uint64(offset), 8)
+			load := builder.AllocateInstruction().
+				AsLoad(addr, offset, ssa.TypeI64).
+				Insert(builder).Return()
+			ret := builder.AllocateInstruction().
+				AsInsertlane(vector, load, laneIndex, ssa.VecLaneI64x2).
+				Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecV128Load32zero, wasm.OpcodeVecV128Load64zero:
+			_, offset := c.readMemArg()
+			if state.unreachable {
+				break
+			}
+
+			var scalarType ssa.Type
+			switch vecOp {
+			case wasm.OpcodeVecV128Load32zero:
+				scalarType = ssa.TypeF32
+			case wasm.OpcodeVecV128Load64zero:
+				scalarType = ssa.TypeF64
+			}
+
+			baseAddr := state.pop()
+			addr := c.memOpSetup(baseAddr, uint64(offset), uint64(scalarType.Size()))
+
+			ret := builder.AllocateInstruction().
+				AsVZeroExtLoad(addr, offset, scalarType).
+				Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecV128Load8x8u, wasm.OpcodeVecV128Load8x8s,
+			wasm.OpcodeVecV128Load16x4u, wasm.OpcodeVecV128Load16x4s,
+			wasm.OpcodeVecV128Load32x2u, wasm.OpcodeVecV128Load32x2s:
+			_, offset := c.readMemArg()
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			var signed bool
+			switch vecOp {
+			case wasm.OpcodeVecV128Load8x8s:
+				signed = true
+				fallthrough
+			case wasm.OpcodeVecV128Load8x8u:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecV128Load16x4s:
+				signed = true
+				fallthrough
+			case wasm.OpcodeVecV128Load16x4u:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecV128Load32x2s:
+				signed = true
+				fallthrough
+			case wasm.OpcodeVecV128Load32x2u:
+				lane = ssa.VecLaneI32x4
+			}
+			baseAddr := state.pop()
+			addr := c.memOpSetup(baseAddr, uint64(offset), 8)
+			load := builder.AllocateInstruction().
+				AsLoad(addr, offset, ssa.TypeV128).
+				Insert(builder).Return()
+			ret := builder.AllocateInstruction().
+				AsWiden(load, lane, signed, true).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128Load8Splat, wasm.OpcodeVecV128Load16Splat,
+			wasm.OpcodeVecV128Load32Splat, wasm.OpcodeVecV128Load64Splat:
+			_, offset := c.readMemArg()
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			var opSize uint64
+			switch vecOp {
+			case wasm.OpcodeVecV128Load8Splat:
+				lane, opSize = ssa.VecLaneI8x16, 1
+			case wasm.OpcodeVecV128Load16Splat:
+				lane, opSize = ssa.VecLaneI16x8, 2
+			case wasm.OpcodeVecV128Load32Splat:
+				lane, opSize = ssa.VecLaneI32x4, 4
+			case wasm.OpcodeVecV128Load64Splat:
+				lane, opSize = ssa.VecLaneI64x2, 8
+			}
+			baseAddr := state.pop()
+			addr := c.memOpSetup(baseAddr, uint64(offset), opSize)
+			ret := builder.AllocateInstruction().
+				AsLoadSplat(addr, offset, lane).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128Store:
+			_, offset := c.readMemArg()
+			if state.unreachable {
+				break
+			}
+			value := state.pop()
+			baseAddr := state.pop()
+			addr := c.memOpSetup(baseAddr, uint64(offset), 16)
+			builder.AllocateInstruction().
+				AsStore(ssa.OpcodeStore, value, addr, offset).
+				Insert(builder)
+		case wasm.OpcodeVecV128Store8Lane, wasm.OpcodeVecV128Store16Lane,
+			wasm.OpcodeVecV128Store32Lane, wasm.OpcodeVecV128Store64Lane:
+			_, offset := c.readMemArg()
+			state.pc++
+			if state.unreachable {
+				break
+			}
+			laneIndex := c.wasmFunctionBody[state.pc]
+			var storeOp ssa.Opcode
+			var lane ssa.VecLane
+			var opSize uint64
+			switch vecOp {
+			case wasm.OpcodeVecV128Store8Lane:
+				storeOp, lane, opSize = ssa.OpcodeIstore8, ssa.VecLaneI8x16, 1
+			case wasm.OpcodeVecV128Store16Lane:
+				storeOp, lane, opSize = ssa.OpcodeIstore16, ssa.VecLaneI16x8, 2
+			case wasm.OpcodeVecV128Store32Lane:
+				storeOp, lane, opSize = ssa.OpcodeIstore32, ssa.VecLaneI32x4, 4
+			case wasm.OpcodeVecV128Store64Lane:
+				storeOp, lane, opSize = ssa.OpcodeStore, ssa.VecLaneI64x2, 8
+			}
+			vector := state.pop()
+			baseAddr := state.pop()
+			addr := c.memOpSetup(baseAddr, uint64(offset), opSize)
+			value := builder.AllocateInstruction().
+				AsExtractlane(vector, laneIndex, lane, false).
+				Insert(builder).Return()
+			builder.AllocateInstruction().
+				AsStore(storeOp, value, addr, offset).
+				Insert(builder)
+		case wasm.OpcodeVecV128Not:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVbnot(v1).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128And:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVband(v1, v2).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128AndNot:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVbandnot(v1, v2).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128Or:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVbor(v1, v2).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128Xor:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVbxor(v1, v2).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128Bitselect:
+			if state.unreachable {
+				break
+			}
+			c := state.pop()
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVbitselect(c, v1, v2).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128AnyTrue:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVanyTrue(v1).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16AllTrue, wasm.OpcodeVecI16x8AllTrue, wasm.OpcodeVecI32x4AllTrue, wasm.OpcodeVecI64x2AllTrue:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16AllTrue:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8AllTrue:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4AllTrue:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2AllTrue:
+				lane = ssa.VecLaneI64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVallTrue(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16BitMask, wasm.OpcodeVecI16x8BitMask, wasm.OpcodeVecI32x4BitMask, wasm.OpcodeVecI64x2BitMask:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16BitMask:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8BitMask:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4BitMask:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2BitMask:
+				lane = ssa.VecLaneI64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVhighBits(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16Abs, wasm.OpcodeVecI16x8Abs, wasm.OpcodeVecI32x4Abs, wasm.OpcodeVecI64x2Abs:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16Abs:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8Abs:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4Abs:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2Abs:
+				lane = ssa.VecLaneI64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVIabs(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16Neg, wasm.OpcodeVecI16x8Neg, wasm.OpcodeVecI32x4Neg, wasm.OpcodeVecI64x2Neg:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16Neg:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8Neg:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4Neg:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2Neg:
+				lane = ssa.VecLaneI64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVIneg(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16Popcnt:
+			if state.unreachable {
+				break
+			}
+			lane := ssa.VecLaneI8x16
+			v1 := state.pop()
+
+			ret := builder.AllocateInstruction().AsVIpopcnt(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16Add, wasm.OpcodeVecI16x8Add, wasm.OpcodeVecI32x4Add, wasm.OpcodeVecI64x2Add:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16Add:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8Add:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4Add:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2Add:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVIadd(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16AddSatS, wasm.OpcodeVecI16x8AddSatS:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16AddSatS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8AddSatS:
+				lane = ssa.VecLaneI16x8
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVSaddSat(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16AddSatU, wasm.OpcodeVecI16x8AddSatU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16AddSatU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8AddSatU:
+				lane = ssa.VecLaneI16x8
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVUaddSat(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16SubSatS, wasm.OpcodeVecI16x8SubSatS:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16SubSatS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8SubSatS:
+				lane = ssa.VecLaneI16x8
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVSsubSat(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16SubSatU, wasm.OpcodeVecI16x8SubSatU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16SubSatU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8SubSatU:
+				lane = ssa.VecLaneI16x8
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVUsubSat(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecI8x16Sub, wasm.OpcodeVecI16x8Sub, wasm.OpcodeVecI32x4Sub, wasm.OpcodeVecI64x2Sub:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16Sub:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8Sub:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4Sub:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2Sub:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVIsub(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16MinS, wasm.OpcodeVecI16x8MinS, wasm.OpcodeVecI32x4MinS:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16MinS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8MinS:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4MinS:
+				lane = ssa.VecLaneI32x4
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVImin(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16MinU, wasm.OpcodeVecI16x8MinU, wasm.OpcodeVecI32x4MinU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16MinU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8MinU:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4MinU:
+				lane = ssa.VecLaneI32x4
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVUmin(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16MaxS, wasm.OpcodeVecI16x8MaxS, wasm.OpcodeVecI32x4MaxS:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16MaxS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8MaxS:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4MaxS:
+				lane = ssa.VecLaneI32x4
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVImax(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16MaxU, wasm.OpcodeVecI16x8MaxU, wasm.OpcodeVecI32x4MaxU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16MaxU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8MaxU:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4MaxU:
+				lane = ssa.VecLaneI32x4
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVUmax(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16AvgrU, wasm.OpcodeVecI16x8AvgrU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16AvgrU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8AvgrU:
+				lane = ssa.VecLaneI16x8
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVAvgRound(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI16x8Mul, wasm.OpcodeVecI32x4Mul, wasm.OpcodeVecI64x2Mul:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI16x8Mul:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4Mul:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2Mul:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVImul(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI16x8Q15mulrSatS:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsSqmulRoundSat(v1, v2, ssa.VecLaneI16x8).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16Eq, wasm.OpcodeVecI16x8Eq, wasm.OpcodeVecI32x4Eq, wasm.OpcodeVecI64x2Eq:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16Eq:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8Eq:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4Eq:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2Eq:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16Ne, wasm.OpcodeVecI16x8Ne, wasm.OpcodeVecI32x4Ne, wasm.OpcodeVecI64x2Ne:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16Ne:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8Ne:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4Ne:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2Ne:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondNotEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16LtS, wasm.OpcodeVecI16x8LtS, wasm.OpcodeVecI32x4LtS, wasm.OpcodeVecI64x2LtS:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16LtS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8LtS:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4LtS:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2LtS:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondSignedLessThan, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16LtU, wasm.OpcodeVecI16x8LtU, wasm.OpcodeVecI32x4LtU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16LtU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8LtU:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4LtU:
+				lane = ssa.VecLaneI32x4
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondUnsignedLessThan, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16LeS, wasm.OpcodeVecI16x8LeS, wasm.OpcodeVecI32x4LeS, wasm.OpcodeVecI64x2LeS:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16LeS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8LeS:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4LeS:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2LeS:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondSignedLessThanOrEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16LeU, wasm.OpcodeVecI16x8LeU, wasm.OpcodeVecI32x4LeU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16LeU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8LeU:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4LeU:
+				lane = ssa.VecLaneI32x4
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondUnsignedLessThanOrEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16GtS, wasm.OpcodeVecI16x8GtS, wasm.OpcodeVecI32x4GtS, wasm.OpcodeVecI64x2GtS:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16GtS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8GtS:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4GtS:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2GtS:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondSignedGreaterThan, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16GtU, wasm.OpcodeVecI16x8GtU, wasm.OpcodeVecI32x4GtU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16GtU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8GtU:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4GtU:
+				lane = ssa.VecLaneI32x4
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondUnsignedGreaterThan, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16GeS, wasm.OpcodeVecI16x8GeS, wasm.OpcodeVecI32x4GeS, wasm.OpcodeVecI64x2GeS:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16GeS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8GeS:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4GeS:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2GeS:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondSignedGreaterThanOrEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16GeU, wasm.OpcodeVecI16x8GeU, wasm.OpcodeVecI32x4GeU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16GeU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8GeU:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4GeU:
+				lane = ssa.VecLaneI32x4
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVIcmp(v1, v2, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Max, wasm.OpcodeVecF64x2Max:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Max:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Max:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVFmax(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Abs, wasm.OpcodeVecF64x2Abs:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Abs:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Abs:
+				lane = ssa.VecLaneF64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVFabs(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Min, wasm.OpcodeVecF64x2Min:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Min:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Min:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVFmin(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Neg, wasm.OpcodeVecF64x2Neg:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Neg:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Neg:
+				lane = ssa.VecLaneF64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVFneg(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Sqrt, wasm.OpcodeVecF64x2Sqrt:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Sqrt:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Sqrt:
+				lane = ssa.VecLaneF64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVSqrt(v1, lane).Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecF32x4Add, wasm.OpcodeVecF64x2Add:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Add:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Add:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVFadd(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Sub, wasm.OpcodeVecF64x2Sub:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Sub:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Sub:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVFsub(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Mul, wasm.OpcodeVecF64x2Mul:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Mul:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Mul:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVFmul(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Div, wasm.OpcodeVecF64x2Div:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Div:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Div:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVFdiv(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecI16x8ExtaddPairwiseI8x16S, wasm.OpcodeVecI16x8ExtaddPairwiseI8x16U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			// TODO: The sequence `Widen; Widen; IaddPairwise` can be substituted for a single instruction on some ISAs.
+			signed := vecOp == wasm.OpcodeVecI16x8ExtaddPairwiseI8x16S
+			vlo := builder.AllocateInstruction().AsWiden(v1, ssa.VecLaneI8x16, signed, true).Insert(builder).Return()
+			vhi := builder.AllocateInstruction().AsWiden(v1, ssa.VecLaneI8x16, signed, false).Insert(builder).Return()
+			ret := builder.AllocateInstruction().AsIaddPairwise(vlo, vhi, ssa.VecLaneI16x8).Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecI32x4ExtaddPairwiseI16x8S, wasm.OpcodeVecI32x4ExtaddPairwiseI16x8U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			// TODO: The sequence `Widen; Widen; IaddPairwise` can be substituted for a single instruction on some ISAs.
+			signed := vecOp == wasm.OpcodeVecI32x4ExtaddPairwiseI16x8S
+			vlo := builder.AllocateInstruction().AsWiden(v1, ssa.VecLaneI16x8, signed, true).Insert(builder).Return()
+			vhi := builder.AllocateInstruction().AsWiden(v1, ssa.VecLaneI16x8, signed, false).Insert(builder).Return()
+			ret := builder.AllocateInstruction().AsIaddPairwise(vlo, vhi, ssa.VecLaneI32x4).Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecI16x8ExtMulLowI8x16S, wasm.OpcodeVecI16x8ExtMulLowI8x16U:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := c.lowerExtMul(
+				v1, v2,
+				ssa.VecLaneI8x16, ssa.VecLaneI16x8,
+				vecOp == wasm.OpcodeVecI16x8ExtMulLowI8x16S, true)
+			state.push(ret)
+
+		case wasm.OpcodeVecI16x8ExtMulHighI8x16S, wasm.OpcodeVecI16x8ExtMulHighI8x16U:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := c.lowerExtMul(
+				v1, v2,
+				ssa.VecLaneI8x16, ssa.VecLaneI16x8,
+				vecOp == wasm.OpcodeVecI16x8ExtMulHighI8x16S, false)
+			state.push(ret)
+
+		case wasm.OpcodeVecI32x4ExtMulLowI16x8S, wasm.OpcodeVecI32x4ExtMulLowI16x8U:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := c.lowerExtMul(
+				v1, v2,
+				ssa.VecLaneI16x8, ssa.VecLaneI32x4,
+				vecOp == wasm.OpcodeVecI32x4ExtMulLowI16x8S, true)
+			state.push(ret)
+
+		case wasm.OpcodeVecI32x4ExtMulHighI16x8S, wasm.OpcodeVecI32x4ExtMulHighI16x8U:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := c.lowerExtMul(
+				v1, v2,
+				ssa.VecLaneI16x8, ssa.VecLaneI32x4,
+				vecOp == wasm.OpcodeVecI32x4ExtMulHighI16x8S, false)
+			state.push(ret)
+		case wasm.OpcodeVecI64x2ExtMulLowI32x4S, wasm.OpcodeVecI64x2ExtMulLowI32x4U:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := c.lowerExtMul(
+				v1, v2,
+				ssa.VecLaneI32x4, ssa.VecLaneI64x2,
+				vecOp == wasm.OpcodeVecI64x2ExtMulLowI32x4S, true)
+			state.push(ret)
+
+		case wasm.OpcodeVecI64x2ExtMulHighI32x4S, wasm.OpcodeVecI64x2ExtMulHighI32x4U:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := c.lowerExtMul(
+				v1, v2,
+				ssa.VecLaneI32x4, ssa.VecLaneI64x2,
+				vecOp == wasm.OpcodeVecI64x2ExtMulHighI32x4S, false)
+			state.push(ret)
+
+		case wasm.OpcodeVecI32x4DotI16x8S:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+
+			// TODO: The sequence `Widen; Widen; VIMul` can be substituted for a single instruction on some ISAs.
+			v1lo := builder.AllocateInstruction().AsWiden(v1, ssa.VecLaneI16x8, true, true).Insert(builder).Return()
+			v2lo := builder.AllocateInstruction().AsWiden(v2, ssa.VecLaneI16x8, true, true).Insert(builder).Return()
+			low := builder.AllocateInstruction().AsVImul(v1lo, v2lo, ssa.VecLaneI32x4).Insert(builder).Return()
+
+			v1hi := builder.AllocateInstruction().AsWiden(v1, ssa.VecLaneI16x8, true, false).Insert(builder).Return()
+			v2hi := builder.AllocateInstruction().AsWiden(v2, ssa.VecLaneI16x8, true, false).Insert(builder).Return()
+			high := builder.AllocateInstruction().AsVImul(v1hi, v2hi, ssa.VecLaneI32x4).Insert(builder).Return()
+
+			ret := builder.AllocateInstruction().AsIaddPairwise(low, high, ssa.VecLaneI32x4).Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecF32x4Eq, wasm.OpcodeVecF64x2Eq:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Eq:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Eq:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcmp(v1, v2, ssa.FloatCmpCondEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Ne, wasm.OpcodeVecF64x2Ne:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Ne:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Ne:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcmp(v1, v2, ssa.FloatCmpCondNotEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Lt, wasm.OpcodeVecF64x2Lt:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Lt:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Lt:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcmp(v1, v2, ssa.FloatCmpCondLessThan, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Le, wasm.OpcodeVecF64x2Le:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Le:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Le:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcmp(v1, v2, ssa.FloatCmpCondLessThanOrEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Gt, wasm.OpcodeVecF64x2Gt:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Gt:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Gt:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcmp(v1, v2, ssa.FloatCmpCondGreaterThan, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Ge, wasm.OpcodeVecF64x2Ge:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Ge:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Ge:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcmp(v1, v2, ssa.FloatCmpCondGreaterThanOrEqual, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Ceil, wasm.OpcodeVecF64x2Ceil:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Ceil:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Ceil:
+				lane = ssa.VecLaneF64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVCeil(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Floor, wasm.OpcodeVecF64x2Floor:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Floor:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Floor:
+				lane = ssa.VecLaneF64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVFloor(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Trunc, wasm.OpcodeVecF64x2Trunc:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Trunc:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Trunc:
+				lane = ssa.VecLaneF64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVTrunc(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Nearest, wasm.OpcodeVecF64x2Nearest:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Nearest:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Nearest:
+				lane = ssa.VecLaneF64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVNearest(v1, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Pmin, wasm.OpcodeVecF64x2Pmin:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Pmin:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Pmin:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVMinPseudo(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4Pmax, wasm.OpcodeVecF64x2Pmax:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecF32x4Pmax:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Pmax:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVMaxPseudo(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI32x4TruncSatF32x4S, wasm.OpcodeVecI32x4TruncSatF32x4U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcvtToIntSat(v1, ssa.VecLaneF32x4, vecOp == wasm.OpcodeVecI32x4TruncSatF32x4S).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI32x4TruncSatF64x2SZero, wasm.OpcodeVecI32x4TruncSatF64x2UZero:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcvtToIntSat(v1, ssa.VecLaneF64x2, vecOp == wasm.OpcodeVecI32x4TruncSatF64x2SZero).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4ConvertI32x4S, wasm.OpcodeVecF32x4ConvertI32x4U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsVFcvtFromInt(v1, ssa.VecLaneF32x4, vecOp == wasm.OpcodeVecF32x4ConvertI32x4S).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF64x2ConvertLowI32x4S, wasm.OpcodeVecF64x2ConvertLowI32x4U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			v1w := builder.AllocateInstruction().
+				AsWiden(v1, ssa.VecLaneI32x4, vecOp == wasm.OpcodeVecF64x2ConvertLowI32x4S, true).Insert(builder).Return()
+			ret := builder.AllocateInstruction().
+				AsVFcvtFromInt(v1w, ssa.VecLaneF64x2, vecOp == wasm.OpcodeVecF64x2ConvertLowI32x4S).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16NarrowI16x8S, wasm.OpcodeVecI8x16NarrowI16x8U:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsNarrow(v1, v2, ssa.VecLaneI16x8, vecOp == wasm.OpcodeVecI8x16NarrowI16x8S).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI16x8NarrowI32x4S, wasm.OpcodeVecI16x8NarrowI32x4U:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsNarrow(v1, v2, ssa.VecLaneI32x4, vecOp == wasm.OpcodeVecI16x8NarrowI32x4S).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI16x8ExtendLowI8x16S, wasm.OpcodeVecI16x8ExtendLowI8x16U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsWiden(v1, ssa.VecLaneI8x16, vecOp == wasm.OpcodeVecI16x8ExtendLowI8x16S, true).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI16x8ExtendHighI8x16S, wasm.OpcodeVecI16x8ExtendHighI8x16U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsWiden(v1, ssa.VecLaneI8x16, vecOp == wasm.OpcodeVecI16x8ExtendHighI8x16S, false).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI32x4ExtendLowI16x8S, wasm.OpcodeVecI32x4ExtendLowI16x8U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsWiden(v1, ssa.VecLaneI16x8, vecOp == wasm.OpcodeVecI32x4ExtendLowI16x8S, true).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI32x4ExtendHighI16x8S, wasm.OpcodeVecI32x4ExtendHighI16x8U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsWiden(v1, ssa.VecLaneI16x8, vecOp == wasm.OpcodeVecI32x4ExtendHighI16x8S, false).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI64x2ExtendLowI32x4S, wasm.OpcodeVecI64x2ExtendLowI32x4U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsWiden(v1, ssa.VecLaneI32x4, vecOp == wasm.OpcodeVecI64x2ExtendLowI32x4S, true).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI64x2ExtendHighI32x4S, wasm.OpcodeVecI64x2ExtendHighI32x4U:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsWiden(v1, ssa.VecLaneI32x4, vecOp == wasm.OpcodeVecI64x2ExtendHighI32x4S, false).
+				Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecF64x2PromoteLowF32x4Zero:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsFvpromoteLow(v1, ssa.VecLaneF32x4).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecF32x4DemoteF64x2Zero:
+			if state.unreachable {
+				break
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().
+				AsFvdemote(v1, ssa.VecLaneF64x2).
+				Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16Shl, wasm.OpcodeVecI16x8Shl, wasm.OpcodeVecI32x4Shl, wasm.OpcodeVecI64x2Shl:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16Shl:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8Shl:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4Shl:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2Shl:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVIshl(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16ShrS, wasm.OpcodeVecI16x8ShrS, wasm.OpcodeVecI32x4ShrS, wasm.OpcodeVecI64x2ShrS:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16ShrS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8ShrS:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4ShrS:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2ShrS:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVSshr(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16ShrU, wasm.OpcodeVecI16x8ShrU, wasm.OpcodeVecI32x4ShrU, wasm.OpcodeVecI64x2ShrU:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16ShrU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8ShrU:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4ShrU:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2ShrU:
+				lane = ssa.VecLaneI64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsVUshr(v1, v2, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecI8x16ExtractLaneS, wasm.OpcodeVecI16x8ExtractLaneS:
+			state.pc++
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16ExtractLaneS:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8ExtractLaneS:
+				lane = ssa.VecLaneI16x8
+			}
+			v1 := state.pop()
+			index := c.wasmFunctionBody[state.pc]
+			ext := builder.AllocateInstruction().AsExtractlane(v1, index, lane, true).Insert(builder).Return()
+			state.push(ext)
+		case wasm.OpcodeVecI8x16ExtractLaneU, wasm.OpcodeVecI16x8ExtractLaneU,
+			wasm.OpcodeVecI32x4ExtractLane, wasm.OpcodeVecI64x2ExtractLane,
+			wasm.OpcodeVecF32x4ExtractLane, wasm.OpcodeVecF64x2ExtractLane:
+			state.pc++ // Skip the immediate value.
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16ExtractLaneU:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8ExtractLaneU:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4ExtractLane:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2ExtractLane:
+				lane = ssa.VecLaneI64x2
+			case wasm.OpcodeVecF32x4ExtractLane:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2ExtractLane:
+				lane = ssa.VecLaneF64x2
+			}
+			v1 := state.pop()
+			index := c.wasmFunctionBody[state.pc]
+			ext := builder.AllocateInstruction().AsExtractlane(v1, index, lane, false).Insert(builder).Return()
+			state.push(ext)
+		case wasm.OpcodeVecI8x16ReplaceLane, wasm.OpcodeVecI16x8ReplaceLane,
+			wasm.OpcodeVecI32x4ReplaceLane, wasm.OpcodeVecI64x2ReplaceLane,
+			wasm.OpcodeVecF32x4ReplaceLane, wasm.OpcodeVecF64x2ReplaceLane:
+			state.pc++
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16ReplaceLane:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8ReplaceLane:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4ReplaceLane:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2ReplaceLane:
+				lane = ssa.VecLaneI64x2
+			case wasm.OpcodeVecF32x4ReplaceLane:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2ReplaceLane:
+				lane = ssa.VecLaneF64x2
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			index := c.wasmFunctionBody[state.pc]
+			ret := builder.AllocateInstruction().AsInsertlane(v1, v2, index, lane).Insert(builder).Return()
+			state.push(ret)
+		case wasm.OpcodeVecV128i8x16Shuffle:
+			state.pc++
+			laneIndexes := c.wasmFunctionBody[state.pc : state.pc+16]
+			state.pc += 15
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsShuffle(v1, v2, laneIndexes).Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecI8x16Swizzle:
+			if state.unreachable {
+				break
+			}
+			v2 := state.pop()
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsSwizzle(v1, v2, ssa.VecLaneI8x16).Insert(builder).Return()
+			state.push(ret)
+
+		case wasm.OpcodeVecI8x16Splat,
+			wasm.OpcodeVecI16x8Splat,
+			wasm.OpcodeVecI32x4Splat,
+			wasm.OpcodeVecI64x2Splat,
+			wasm.OpcodeVecF32x4Splat,
+			wasm.OpcodeVecF64x2Splat:
+			if state.unreachable {
+				break
+			}
+			var lane ssa.VecLane
+			switch vecOp {
+			case wasm.OpcodeVecI8x16Splat:
+				lane = ssa.VecLaneI8x16
+			case wasm.OpcodeVecI16x8Splat:
+				lane = ssa.VecLaneI16x8
+			case wasm.OpcodeVecI32x4Splat:
+				lane = ssa.VecLaneI32x4
+			case wasm.OpcodeVecI64x2Splat:
+				lane = ssa.VecLaneI64x2
+			case wasm.OpcodeVecF32x4Splat:
+				lane = ssa.VecLaneF32x4
+			case wasm.OpcodeVecF64x2Splat:
+				lane = ssa.VecLaneF64x2
+			}
+			v1 := state.pop()
+			ret := builder.AllocateInstruction().AsSplat(v1, lane).Insert(builder).Return()
+			state.push(ret)
+
+		default:
+			panic("TODO: unsupported vector instruction: " + wasm.VectorInstructionName(vecOp))
+		}
+	case wasm.OpcodeRefFunc:
+		funcIndex := c.readI32u()
+		if state.unreachable {
+			break
+		}
+
+		c.storeCallerModuleContext()
+
+		funcIndexVal := builder.AllocateInstruction().AsIconst32(funcIndex).Insert(builder).Return()
+
+		refFuncPtr := builder.AllocateInstruction().
+			AsLoad(c.execCtxPtrValue,
+				wazevoapi.ExecutionContextOffsetRefFuncTrampolineAddress.U32(),
+				ssa.TypeI64,
+			).Insert(builder).Return()
+
+		// TODO: reuse the slice.
+		args := []ssa.Value{c.execCtxPtrValue, funcIndexVal}
+		refFuncRet := builder.
+			AllocateInstruction().
+			AsCallIndirect(refFuncPtr, &c.refFuncSig, args).
+			Insert(builder).Return()
+		state.push(refFuncRet)
+
+	case wasm.OpcodeRefNull:
+		c.loweringState.pc++ // skips the reference type as we treat both of them as i64(0).
+		if state.unreachable {
+			break
+		}
+		ret := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
+		state.push(ret)
+	case wasm.OpcodeRefIsNull:
+		if state.unreachable {
+			break
+		}
+		r := state.pop()
+		zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder)
+		icmp := builder.AllocateInstruction().
+			AsIcmp(r, zero.Return(), ssa.IntegerCmpCondEqual).
+			Insert(builder).
+			Return()
+		state.push(icmp)
+	case wasm.OpcodeTableSet:
+		tableIndex := c.readI32u()
+		if state.unreachable {
+			break
+		}
+		r := state.pop()
+		targetOffsetInTable := state.pop()
+
+		elementAddr := c.lowerAccessTableWithBoundsCheck(tableIndex, targetOffsetInTable)
+		builder.AllocateInstruction().AsStore(ssa.OpcodeStore, r, elementAddr, 0).Insert(builder)
+
+	case wasm.OpcodeTableGet:
+		tableIndex := c.readI32u()
+		if state.unreachable {
+			break
+		}
+		targetOffsetInTable := state.pop()
+		elementAddr := c.lowerAccessTableWithBoundsCheck(tableIndex, targetOffsetInTable)
+		loaded := builder.AllocateInstruction().AsLoad(elementAddr, 0, ssa.TypeI64).Insert(builder).Return()
+		state.push(loaded)
 	default:
 		panic("TODO: unsupported in wazevo yet: " + wasm.InstructionName(op))
 	}
+
+	if wazevoapi.FrontEndLoggingEnabled {
+		fmt.Println("--------- Translated " + wasm.InstructionName(op) + " --------")
+		fmt.Println("state: " + c.loweringState.String())
+		fmt.Println(c.formatBuilder())
+		fmt.Println("--------------------------")
+	}
+	c.loweringState.pc++
+}
+
+func (c *Compiler) lowerExtMul(v1, v2 ssa.Value, from, to ssa.VecLane, signed, low bool) ssa.Value {
+	// TODO: The sequence `Widen; Widen; VIMul` can be substituted for a single instruction on some ISAs.
+	builder := c.ssaBuilder
+
+	v1lo := builder.AllocateInstruction().AsWiden(v1, from, signed, low).Insert(builder).Return()
+	v2lo := builder.AllocateInstruction().AsWiden(v2, from, signed, low).Insert(builder).Return()
+
+	return builder.AllocateInstruction().AsVImul(v1lo, v2lo, to).Insert(builder).Return()
 }
 
 const (
@@ -1282,16 +3237,12 @@ const (
 	tableInstanceLenOffset         = tableInstanceBaseAddressOffset + 8
 )
 
-func (c *Compiler) lowerCallIndirect(typeIndex, tableIndex uint32) {
+func (c *Compiler) lowerAccessTableWithBoundsCheck(tableIndex uint32, elementOffsetInTable ssa.Value) (elementAddress ssa.Value) {
 	builder := c.ssaBuilder
-	state := c.state()
-
-	targetOffsetInTable := state.pop()
 
 	// Load the table.
-	tableOffset := c.offset.TableOffset(int(tableIndex))
 	loadTableInstancePtr := builder.AllocateInstruction()
-	loadTableInstancePtr.AsLoad(c.moduleCtxPtrValue, tableOffset.U32(), ssa.TypeI64)
+	loadTableInstancePtr.AsLoad(c.moduleCtxPtrValue, c.offset.TableOffset(int(tableIndex)).U32(), ssa.TypeI64)
 	builder.InsertInstruction(loadTableInstancePtr)
 	tableInstancePtr := loadTableInstancePtr.Return()
 
@@ -1303,7 +3254,7 @@ func (c *Compiler) lowerCallIndirect(typeIndex, tableIndex uint32) {
 
 	// Compare the length and the target, and trap if out of bounds.
 	checkOOB := builder.AllocateInstruction()
-	checkOOB.AsIcmp(targetOffsetInTable, tableLen, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual)
+	checkOOB.AsIcmp(elementOffsetInTable, tableLen, ssa.IntegerCmpCondUnsignedGreaterThanOrEqual)
 	builder.InsertInstruction(checkOOB)
 	exitIfOOB := builder.AllocateInstruction()
 	exitIfOOB.AsExitIfTrueWithCode(c.execCtxPtrValue, checkOOB.Return(), wazevoapi.ExitCodeTableOutOfBounds)
@@ -1320,14 +3271,23 @@ func (c *Compiler) lowerCallIndirect(typeIndex, tableIndex uint32) {
 	three := builder.AllocateInstruction()
 	three.AsIconst64(3)
 	builder.InsertInstruction(three)
-	multiplyBy8.AsIshl(targetOffsetInTable, three.Return())
+	multiplyBy8.AsIshl(elementOffsetInTable, three.Return())
 	builder.InsertInstruction(multiplyBy8)
 	targetOffsetInTableMultipliedBy8 := multiplyBy8.Return()
+
 	// Then add the multiplied value to the base which results in the address of the target function (*wazevo.functionInstance)
-	calcFunctionInstancePtrAddressInTable := builder.AllocateInstruction()
-	calcFunctionInstancePtrAddressInTable.AsIadd(tableBase, targetOffsetInTableMultipliedBy8)
-	builder.InsertInstruction(calcFunctionInstancePtrAddressInTable)
-	functionInstancePtrAddress := calcFunctionInstancePtrAddressInTable.Return()
+	calcElementAddressInTable := builder.AllocateInstruction()
+	calcElementAddressInTable.AsIadd(tableBase, targetOffsetInTableMultipliedBy8)
+	builder.InsertInstruction(calcElementAddressInTable)
+	return calcElementAddressInTable.Return()
+}
+
+func (c *Compiler) lowerCallIndirect(typeIndex, tableIndex uint32) {
+	builder := c.ssaBuilder
+	state := c.state()
+
+	elementOffsetInTable := state.pop()
+	functionInstancePtrAddress := c.lowerAccessTableWithBoundsCheck(tableIndex, elementOffsetInTable)
 	loadFunctionInstancePtr := builder.AllocateInstruction()
 	loadFunctionInstancePtr.AsLoad(functionInstancePtrAddress, 0, ssa.TypeI64)
 	builder.InsertInstruction(loadFunctionInstancePtr)
@@ -1442,6 +3402,18 @@ func (c *Compiler) memOpSetup(baseAddr ssa.Value, constOffset, operationSizeInBy
 	addrCalc.AsIadd(memBase, extBaseAddr.Return())
 	builder.InsertInstruction(addrCalc)
 	return addrCalc.Return()
+}
+
+func (c *Compiler) callMemmove(dst, src, size ssa.Value) {
+	args := []ssa.Value{dst, src, size} // TODO: reuse the slice.
+
+	builder := c.ssaBuilder
+	memmovePtr := builder.AllocateInstruction().
+		AsLoad(c.execCtxPtrValue,
+			wazevoapi.ExecutionContextOffsetMemmoveAddress.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+	builder.AllocateInstruction().AsCallIndirect(memmovePtr, &c.memmoveSig, args).Insert(builder)
 }
 
 func (c *Compiler) reloadAfterCall() {
@@ -1602,7 +3574,7 @@ func (c *Compiler) storeCallerModuleContext() {
 	execCtx := c.execCtxPtrValue
 	store := builder.AllocateInstruction()
 	store.AsStore(ssa.OpcodeStore,
-		c.moduleCtxPtrValue, execCtx, wazevoapi.ExecutionContextOffsets.CallerModuleContextPtr.U32())
+		c.moduleCtxPtrValue, execCtx, wazevoapi.ExecutionContextOffsetCallerModuleContextPtr.U32())
 	builder.InsertInstruction(store)
 }
 
@@ -1679,6 +3651,12 @@ func (c *Compiler) readMemArg() (align, offset uint32) {
 
 // insertJumpToBlock inserts a jump instruction to the given block in the current block.
 func (c *Compiler) insertJumpToBlock(args []ssa.Value, targetBlk ssa.BasicBlock) {
+	if targetBlk.ReturnBlock() {
+		if c.needListener {
+			c.callListenerAfter()
+		}
+	}
+
 	builder := c.ssaBuilder
 	jmp := builder.AllocateInstruction()
 	jmp.AsJump(args, targetBlk)
@@ -1749,9 +3727,11 @@ func (c *Compiler) lowerBrTable(labels []uint32, index ssa.Value) {
 	// We need trampoline blocks since depending on the target block structure, we might end up inserting moves before jumps,
 	// which cannot be done with br_table. Instead, we can do such per-block moves in the trampoline blocks.
 	// At the linking phase (very end of the backend), we can remove the unnecessary jumps, and therefore no runtime overhead.
-	args := c.loweringState.nPeekDup(numArgs) // Args are always on the top of the stack.
 	currentBlk := builder.CurrentBlock()
 	for i, l := range labels {
+		// Args are always on the top of the stack. Note that we should not share the args slice
+		// among the jump instructions since the args are modified during passes (e.g. redundant phi elimination).
+		args := c.loweringState.nPeekDup(numArgs)
 		targetBlk, _ := state.brTargetArgNumFor(l)
 		trampoline := builder.AllocateBasicBlock()
 		builder.SetCurrentBlock(trampoline)
@@ -1778,4 +3758,158 @@ func (l *loweringState) brTargetArgNumFor(labelIndex uint32) (targetBlk ssa.Basi
 		targetBlk, argNum = targetFrame.followingBlock, len(targetFrame.blockType.Results)
 	}
 	return
+}
+
+func (c *Compiler) callListenerBefore() {
+	c.storeCallerModuleContext()
+
+	builder := c.ssaBuilder
+	beforeListeners1stElement := builder.AllocateInstruction().
+		AsLoad(c.moduleCtxPtrValue,
+			c.offset.BeforeListenerTrampolines1stElement.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+
+	beforeListenerPtr := builder.AllocateInstruction().
+		AsLoad(beforeListeners1stElement, uint32(c.wasmFunctionTypeIndex)*8 /* 8 bytes per index */, ssa.TypeI64).Insert(builder).Return()
+
+	entry := builder.EntryBlock()
+	ps := entry.Params()
+	// TODO: reuse!
+	args := make([]ssa.Value, ps)
+	args[0] = c.execCtxPtrValue
+	args[1] = builder.AllocateInstruction().AsIconst32(c.wasmLocalFunctionIndex).Insert(builder).Return()
+	for i := 2; i < ps; i++ {
+		args[i] = entry.Param(i)
+	}
+
+	beforeSig := c.listenerSignatures[c.wasmFunctionTyp][0]
+	builder.AllocateInstruction().
+		AsCallIndirect(beforeListenerPtr, beforeSig, args).
+		Insert(builder)
+}
+
+func (c *Compiler) callListenerAfter() {
+	c.storeCallerModuleContext()
+
+	builder := c.ssaBuilder
+	afterListeners1stElement := builder.AllocateInstruction().
+		AsLoad(c.moduleCtxPtrValue,
+			c.offset.AfterListenerTrampolines1stElement.U32(),
+			ssa.TypeI64,
+		).Insert(builder).Return()
+
+	afterListenerPtr := builder.AllocateInstruction().
+		AsLoad(afterListeners1stElement,
+			uint32(c.wasmFunctionTypeIndex)*8 /* 8 bytes per index */, ssa.TypeI64).
+		Insert(builder).
+		Return()
+
+	afterSig := c.listenerSignatures[c.wasmFunctionTyp][1]
+	results := c.loweringState.nPeekDup(c.results())
+
+	// TODO: reuse!
+	args := make([]ssa.Value, len(results)+2)
+	args[0] = c.execCtxPtrValue
+	args[1] = builder.AllocateInstruction().AsIconst32(c.wasmLocalFunctionIndex).Insert(builder).Return()
+	for i, r := range results {
+		args[i+2] = r
+	}
+	builder.AllocateInstruction().
+		AsCallIndirect(afterListenerPtr, afterSig, args).
+		Insert(builder)
+}
+
+const (
+	elementOrDataInstanceLenOffset = 8
+	elementOrDataInstanceSize      = 24
+)
+
+// dropInstance inserts instructions to drop the element/data instance specified by the given index.
+func (c *Compiler) dropDataOrElementInstance(index uint32, firstItemOffset wazevoapi.Offset) {
+	builder := c.ssaBuilder
+	instPtr := c.dataOrElementInstanceAddr(index, firstItemOffset)
+
+	zero := builder.AllocateInstruction().AsIconst64(0).Insert(builder).Return()
+
+	// Clear the instance.
+	builder.AllocateInstruction().AsStore(ssa.OpcodeStore, zero, instPtr, 0).Insert(builder)
+	builder.AllocateInstruction().AsStore(ssa.OpcodeStore, zero, instPtr, elementOrDataInstanceLenOffset).Insert(builder)
+	builder.AllocateInstruction().AsStore(ssa.OpcodeStore, zero, instPtr, elementOrDataInstanceLenOffset+8).Insert(builder)
+}
+
+func (c *Compiler) dataOrElementInstanceAddr(index uint32, firstItemOffset wazevoapi.Offset) ssa.Value {
+	builder := c.ssaBuilder
+
+	_1stItemPtr := builder.
+		AllocateInstruction().
+		AsLoad(c.moduleCtxPtrValue, firstItemOffset.U32(), ssa.TypeI64).
+		Insert(builder).Return()
+
+	// Each data/element instance is a slice, so we need to multiply index by 16 to get the offset of the target instance.
+	index = index * elementOrDataInstanceSize
+	indexExt := builder.AllocateInstruction().AsIconst64(uint64(index)).Insert(builder).Return()
+	// Then, add the offset to the address of the instance.
+	instPtr := builder.AllocateInstruction().AsIadd(_1stItemPtr, indexExt).Insert(builder).Return()
+	return instPtr
+}
+
+func (c *Compiler) boundsCheckInDataOrElementInstance(instPtr, offsetInInstance, copySize ssa.Value, exitCode wazevoapi.ExitCode) {
+	builder := c.ssaBuilder
+	dataInstLen := builder.AllocateInstruction().
+		AsLoad(instPtr, elementOrDataInstanceLenOffset, ssa.TypeI64).
+		Insert(builder).Return()
+	ceil := builder.AllocateInstruction().AsIadd(offsetInInstance, copySize).Insert(builder).Return()
+	cmp := builder.AllocateInstruction().
+		AsIcmp(dataInstLen, ceil, ssa.IntegerCmpCondUnsignedLessThan).
+		Insert(builder).
+		Return()
+	builder.AllocateInstruction().
+		AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, exitCode).
+		Insert(builder)
+}
+
+func (c *Compiler) boundsCheckInTable(tableIndex uint32, offset, size ssa.Value) (tableInstancePtr ssa.Value) {
+	builder := c.ssaBuilder
+	dstCeil := builder.AllocateInstruction().AsIadd(offset, size).Insert(builder).Return()
+
+	// Load the table.
+	tableInstancePtr = builder.AllocateInstruction().
+		AsLoad(c.moduleCtxPtrValue, c.offset.TableOffset(int(tableIndex)).U32(), ssa.TypeI64).
+		Insert(builder).Return()
+
+	// Load the table's length.
+	tableLen := builder.AllocateInstruction().
+		AsLoad(tableInstancePtr, tableInstanceLenOffset, ssa.TypeI32).Insert(builder).Return()
+	tableLenExt := builder.AllocateInstruction().AsUExtend(tableLen, 32, 64).Insert(builder).Return()
+
+	// Compare the length and the target, and trap if out of bounds.
+	checkOOB := builder.AllocateInstruction()
+	checkOOB.AsIcmp(tableLenExt, dstCeil, ssa.IntegerCmpCondUnsignedLessThan)
+	builder.InsertInstruction(checkOOB)
+	exitIfOOB := builder.AllocateInstruction()
+	exitIfOOB.AsExitIfTrueWithCode(c.execCtxPtrValue, checkOOB.Return(), wazevoapi.ExitCodeTableOutOfBounds)
+	builder.InsertInstruction(exitIfOOB)
+	return
+}
+
+func (c *Compiler) loadTableBaseAddr(tableInstancePtr ssa.Value) ssa.Value {
+	builder := c.ssaBuilder
+	loadTableBaseAddress := builder.
+		AllocateInstruction().
+		AsLoad(tableInstancePtr, tableInstanceBaseAddressOffset, ssa.TypeI64).
+		Insert(builder)
+	return loadTableBaseAddress.Return()
+}
+
+func (c *Compiler) boundsCheckInMemory(memLen, offset, size ssa.Value) {
+	builder := c.ssaBuilder
+	ceil := builder.AllocateInstruction().AsIadd(offset, size).Insert(builder).Return()
+	cmp := builder.AllocateInstruction().
+		AsIcmp(memLen, ceil, ssa.IntegerCmpCondUnsignedLessThan).
+		Insert(builder).
+		Return()
+	builder.AllocateInstruction().
+		AsExitIfTrueWithCode(c.execCtxPtrValue, cmp, wazevoapi.ExitCodeMemoryOutOfBounds).
+		Insert(builder)
 }
