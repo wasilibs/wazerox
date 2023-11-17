@@ -5,13 +5,13 @@ import (
 	"context"
 	"io"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/experimental"
-	aslogging "github.com/tetratelabs/wazero/internal/assemblyscript/logging"
-	gologging "github.com/tetratelabs/wazero/internal/gojs/logging"
-	"github.com/tetratelabs/wazero/internal/logging"
-	"github.com/tetratelabs/wazero/internal/wasip1"
-	wasilogging "github.com/tetratelabs/wazero/internal/wasip1/logging"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/experimental"
+	aslogging "github.com/wasilibs/wazerox/internal/assemblyscript/logging"
+	gologging "github.com/wasilibs/wazerox/internal/gojs/logging"
+	"github.com/wasilibs/wazerox/internal/logging"
+	"github.com/wasilibs/wazerox/internal/wasip1"
+	wasilogging "github.com/wasilibs/wazerox/internal/wasip1/logging"
 )
 
 type Writer interface {

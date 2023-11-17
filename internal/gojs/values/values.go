@@ -3,7 +3,7 @@ package values
 import (
 	"fmt"
 
-	"github.com/tetratelabs/wazero/internal/gojs/goos"
+	"github.com/wasilibs/wazerox/internal/gojs/goos"
 )
 
 func NewValues() *Values {

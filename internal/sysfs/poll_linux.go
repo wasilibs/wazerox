@@ -5,7 +5,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
+	"github.com/wasilibs/wazerox/experimental/sys"
 )
 
 // pollFd is the struct to query for file descriptor events using poll.

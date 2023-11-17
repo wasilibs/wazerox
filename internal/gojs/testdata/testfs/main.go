@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/tetratelabs/wazero/internal/fstest"
+	"github.com/wasilibs/wazerox/internal/fstest"
 )
 
 func Main() {

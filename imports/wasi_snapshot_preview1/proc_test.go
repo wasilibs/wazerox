@@ -3,10 +3,10 @@ package wasi_snapshot_preview1_test
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasip1"
-	"github.com/tetratelabs/wazero/sys"
+	wazero "github.com/wasilibs/wazerox"
+	"github.com/wasilibs/wazerox/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/wasip1"
+	"github.com/wasilibs/wazerox/sys"
 )
 
 func Test_procExit(t *testing.T) {

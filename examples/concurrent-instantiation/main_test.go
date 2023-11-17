@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/maintester"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/testing/maintester"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 // Test_main ensures the following will work:

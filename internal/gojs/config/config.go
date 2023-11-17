@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/tetratelabs/wazero/internal/platform"
+	"github.com/wasilibs/wazerox/internal/platform"
 )
 
 type Config struct {

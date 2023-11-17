@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tetratelabs/wazero/api"
+	"github.com/wasilibs/wazerox/api"
 )
 
 // ValueType is an extended form of api.ValueType, used to control logging in

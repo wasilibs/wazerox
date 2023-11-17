@@ -3,10 +3,10 @@ package gojs
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero/api"
-	"github.com/tetratelabs/wazero/internal/gojs/custom"
-	"github.com/tetratelabs/wazero/internal/gojs/goos"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/wasilibs/wazerox/api"
+	"github.com/wasilibs/wazerox/internal/gojs/custom"
+	"github.com/wasilibs/wazerox/internal/gojs/goos"
+	"github.com/wasilibs/wazerox/internal/wasm"
 )
 
 // jsCrypto is used by crypto/rand.Read to gets random values.

@@ -3,7 +3,7 @@ package interpreter
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/integration_test/vs"
+	"github.com/wasilibs/wazerox/internal/integration_test/vs"
 )
 
 var runtime = vs.NewWazeroInterpreterRuntime

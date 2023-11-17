@@ -7,14 +7,14 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/isa/arm64"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/frontend"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/testcases"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/wazevoapi"
-	"github.com/tetratelabs/wazero/internal/testing/require"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/backend"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/backend/isa/arm64"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/frontend"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/ssa"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/testcases"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/wazevoapi"
+	"github.com/wasilibs/wazerox/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/wasm"
 )
 
 func TestMain(m *testing.M) {

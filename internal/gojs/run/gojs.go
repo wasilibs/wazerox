@@ -5,10 +5,10 @@ package run
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/internal/gojs"
-	"github.com/tetratelabs/wazero/internal/gojs/config"
-	"github.com/tetratelabs/wazero/sys"
+	wazero "github.com/wasilibs/wazerox"
+	"github.com/wasilibs/wazerox/internal/gojs"
+	"github.com/wasilibs/wazerox/internal/gojs/config"
+	"github.com/wasilibs/wazerox/sys"
 )
 
 func Run(ctx context.Context, r wazero.Runtime, compiled wazero.CompiledModule, moduleConfig wazero.ModuleConfig, config *config.Config) error {

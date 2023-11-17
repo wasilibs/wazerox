@@ -3,7 +3,7 @@ package wazeroir
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 // TestInstructionName ensures that all the operation Kind's stringer is well-defined.

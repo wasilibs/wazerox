@@ -3,7 +3,7 @@ package experimental
 import (
 	"context"
 
-	"github.com/tetratelabs/wazero/api"
+	"github.com/wasilibs/wazerox/api"
 )
 
 // StackIterator allows iterating on each function of the call stack, starting

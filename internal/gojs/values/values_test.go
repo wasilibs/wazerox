@@ -3,8 +3,8 @@ package values
 import (
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/gojs/goos"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/gojs/goos"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func Test_Values(t *testing.T) {

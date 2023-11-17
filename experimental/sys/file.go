@@ -1,6 +1,6 @@
 package sys
 
-import "github.com/tetratelabs/wazero/sys"
+import "github.com/wasilibs/wazerox/sys"
 
 // File is a writeable fs.File bridge backed by syscall functions needed for ABI
 // including WASI and runtime.GOOS=js.

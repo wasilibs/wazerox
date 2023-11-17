@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/tetratelabs/wazero/internal/asm"
+	"github.com/wasilibs/wazerox/internal/asm"
 )
 
 // defaultMaxDisplacementForConstantPool is the maximum displacement allowed for literal move instructions which access

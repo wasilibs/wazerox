@@ -4,7 +4,7 @@ import (
 	"io/fs"
 	"syscall"
 
-	"github.com/tetratelabs/wazero/experimental/sys"
+	"github.com/wasilibs/wazerox/experimental/sys"
 )
 
 func setNonblock(fd uintptr, enable bool) sys.Errno {

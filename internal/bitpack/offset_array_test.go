@@ -5,8 +5,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/tetratelabs/wazero/internal/bitpack"
-	"github.com/tetratelabs/wazero/internal/testing/require"
+	"github.com/wasilibs/wazerox/internal/bitpack"
+	"github.com/wasilibs/wazerox/internal/testing/require"
 )
 
 func TestOffsetArray(t *testing.T) {

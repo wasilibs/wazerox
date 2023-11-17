@@ -3,8 +3,8 @@ package arm64
 import (
 	"fmt"
 
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/backend/regalloc"
-	"github.com/tetratelabs/wazero/internal/engine/wazevo/ssa"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/backend/regalloc"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo/ssa"
 )
 
 type (

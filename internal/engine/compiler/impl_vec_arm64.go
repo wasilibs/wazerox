@@ -1,9 +1,9 @@
 package compiler
 
 import (
-	"github.com/tetratelabs/wazero/internal/asm"
-	"github.com/tetratelabs/wazero/internal/asm/arm64"
-	"github.com/tetratelabs/wazero/internal/wazeroir"
+	"github.com/wasilibs/wazerox/internal/asm"
+	"github.com/wasilibs/wazerox/internal/asm/arm64"
+	"github.com/wasilibs/wazerox/internal/wazeroir"
 )
 
 // compileV128Const implements compiler.compileV128Const for arm64.

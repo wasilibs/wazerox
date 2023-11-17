@@ -1,8 +1,8 @@
 package compiler
 
 import (
-	"github.com/tetratelabs/wazero/internal/asm"
-	"github.com/tetratelabs/wazero/internal/wasm"
+	"github.com/wasilibs/wazerox/internal/asm"
+	"github.com/wasilibs/wazerox/internal/wasm"
 )
 
 // newArchContext returns a new archContext which is architecture-specific type to be embedded in callEngine.

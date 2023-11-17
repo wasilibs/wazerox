@@ -1,6 +1,6 @@
 package fsapi
 
-import experimentalsys "github.com/tetratelabs/wazero/experimental/sys"
+import experimentalsys "github.com/wasilibs/wazerox/experimental/sys"
 
 // File includes methods not yet ready to document for end users, notably
 // non-blocking functionality.
