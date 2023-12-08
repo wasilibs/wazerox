@@ -848,6 +848,11 @@ func callFrameOffset(funcType *wasm.FunctionType) (ret int) {
 //
 // This is defined for testability.
 func (ce *callEngine) deferredOnCall(ctx context.Context, m *wasm.ModuleInstance, recovered interface{}) (err error) {
+	if s, ok := recovered.(*snapshot); ok {
+		// A snapshot that wasn't handled was created by a different call engine possibly from a nested wasm invocation,
+		// let it propagate up to be handled by the caller.
+		panic(s)
+	}
 	if recovered != nil {
 		builder := wasmdebug.NewErrorBuilder()
 
@@ -1258,6 +1263,12 @@ func (s *snapshot) doRestore() {
 	copy(ce.stack, s.stack)
 	ce.returnAddress = uintptr(s.returnAddress)
 	copy(ce.stack[s.hostBase:], s.ret)
+}
+
+// Error implements the same method on error.
+func (s *snapshot) Error() string {
+	return "unhandled snapshot restore, this generally indicates restore was called from a different " +
+		"exported function invocation than snapshot"
 }
 
 // stackIterator implements experimental.StackIterator.
