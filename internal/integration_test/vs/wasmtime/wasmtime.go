@@ -7,8 +7,7 @@ import (
 	"fmt"
 
 	wt "github.com/bytecodealliance/wasmtime-go/v9"
-
-	"github.com/tetratelabs/wazero/internal/integration_test/vs"
+	"github.com/wasilibs/wazerox/internal/integration_test/vs"
 )
 
 func newWasmtimeRuntime() vs.Runtime {

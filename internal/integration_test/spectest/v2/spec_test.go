@@ -7,7 +7,7 @@ import (
 
 	wazero "github.com/wasilibs/wazerox"
 	"github.com/wasilibs/wazerox/api"
-	"github.com/wasilibs/wazerox/internal/engine/wazevo"
+	"github.com/wasilibs/wazerox/experimental/opt"
 	"github.com/wasilibs/wazerox/internal/integration_test/spectest"
 	"github.com/wasilibs/wazerox/internal/platform"
 )
@@ -26,10 +26,9 @@ func TestInterpreter(t *testing.T) {
 }
 
 func TestWazevo(t *testing.T) {
-	c := wazero.NewRuntimeConfigCompiler().WithCoreFeatures(enabledFeatures)
 	if runtime.GOARCH != "arm64" {
 		t.Skip()
 	}
-	wazevo.ConfigureWazevo(c)
+	c := opt.NewRuntimeConfigOptimizingCompiler().WithCoreFeatures(enabledFeatures)
 	spectest.Run(t, Testcases, context.Background(), c)
 }

@@ -15,7 +15,7 @@ import (
 	"github.com/wasilibs/wazerox/api"
 	"github.com/wasilibs/wazerox/experimental"
 	"github.com/wasilibs/wazerox/experimental/logging"
-	"github.com/wasilibs/wazerox/internal/engine/wazevo"
+	"github.com/wasilibs/wazerox/experimental/opt"
 	"github.com/wasilibs/wazerox/internal/integration_test/spectest"
 	v1 "github.com/wasilibs/wazerox/internal/integration_test/spectest/v1"
 	"github.com/wasilibs/wazerox/internal/platform"
@@ -35,8 +35,7 @@ func TestFileCacheSpecTest_wazevo(t *testing.T) {
 	if runtime.GOARCH != "arm64" {
 		return
 	}
-	config := wazero.NewRuntimeConfigCompiler()
-	wazevo.ConfigureWazevo(config)
+	config := opt.NewRuntimeConfigOptimizingCompiler()
 	runAllFileCacheTests(t, config)
 }
 

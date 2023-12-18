@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	wazero "github.com/wasilibs/wazerox"
+	"github.com/wasilibs/wazerox/experimental/opt"
 	"github.com/wasilibs/wazerox/imports/wasi_snapshot_preview1"
-	"github.com/wasilibs/wazerox/internal/engine/wazevo"
 	"github.com/wasilibs/wazerox/internal/platform"
 	"github.com/wasilibs/wazerox/internal/testing/dwarftestdata"
 	"github.com/wasilibs/wazerox/internal/testing/require"
@@ -37,8 +37,7 @@ func TestEngineWazevo_DWARF(t *testing.T) {
 	if runtime.GOARCH != "arm64" {
 		t.Skip()
 	}
-	config := wazero.NewRuntimeConfigInterpreter()
-	wazevo.ConfigureWazevo(config)
+	config := opt.NewRuntimeConfigOptimizingCompiler()
 	runAllTests(t, dwarfTests, config, true)
 }
 

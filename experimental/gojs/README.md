@@ -3,7 +3,7 @@
 When `GOOS=js` and `GOARCH=wasm`, Go's compiler targets WebAssembly Binary
 format (%.wasm).
 
-Wazero's "github.com/tetratelabs/wazero/experimental/gojs" package allows you to run
+Wazero's "github.com/wasilibs/wazerox/experimental/gojs" package allows you to run
 a `%.wasm` file compiled by Go.  This is similar to what is implemented in
 [wasm_exec.js][1]. See https://wazero.io/languages/go/ for more.
 

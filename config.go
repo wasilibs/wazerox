@@ -14,6 +14,7 @@ import (
 	experimentalsys "github.com/wasilibs/wazerox/experimental/sys"
 	"github.com/wasilibs/wazerox/internal/engine/compiler"
 	"github.com/wasilibs/wazerox/internal/engine/interpreter"
+	"github.com/wasilibs/wazerox/internal/engine/wazevo"
 	"github.com/wasilibs/wazerox/internal/filecache"
 	"github.com/wasilibs/wazerox/internal/internalapi"
 	"github.com/wasilibs/wazerox/internal/platform"
@@ -135,7 +136,7 @@ type RuntimeConfig interface {
 	// However, if you use this in tests of a package not named as `main`, then wazero cannot obtain the correct
 	// version of wazero due to the known issue of debug.BuildInfo function: https://github.com/golang/go/issues/33976.
 	// As a consequence, your cache won't contain the correct version information and always be treated as `dev` version.
-	// To avoid this issue, you can pass -ldflags "-X github.com/tetratelabs/wazero/internal/version.version=foo" when running tests.
+	// To avoid this issue, you can pass -ldflags "-X github.com/wasilibs/wazerox/internal/version.version=foo" when running tests.
 	WithCompilationCache(CompilationCache) RuntimeConfig
 
 	// WithCustomSections toggles parsing of "custom sections". Defaults to false.
@@ -188,6 +189,11 @@ type runtimeConfig struct {
 	cache                 CompilationCache
 	storeCustomSections   bool
 	ensureTermination     bool
+}
+
+// EnableOptimizingCompiler implements experimental/opt/enabler.EnableOptimizingCompiler.
+func (c *runtimeConfig) EnableOptimizingCompiler() {
+	c.newEngine = wazevo.NewEngine
 }
 
 // engineLessConfig helps avoid copy/pasting the wrong defaults.
