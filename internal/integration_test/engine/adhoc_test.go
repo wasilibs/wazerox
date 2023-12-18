@@ -18,8 +18,8 @@ import (
 	"github.com/wasilibs/wazerox/api"
 	"github.com/wasilibs/wazerox/experimental"
 	"github.com/wasilibs/wazerox/experimental/logging"
+	"github.com/wasilibs/wazerox/experimental/opt"
 	"github.com/wasilibs/wazerox/experimental/table"
-	"github.com/wasilibs/wazerox/internal/engine/wazevo"
 	"github.com/wasilibs/wazerox/internal/leb128"
 	"github.com/wasilibs/wazerox/internal/platform"
 	"github.com/wasilibs/wazerox/internal/testing/binaryencoding"
@@ -96,8 +96,7 @@ func TestEngineWazevo(t *testing.T) {
 	if runtime.GOARCH != "arm64" {
 		t.Skip()
 	}
-	config := wazero.NewRuntimeConfigInterpreter()
-	wazevo.ConfigureWazevo(config)
+	config := opt.NewRuntimeConfigOptimizingCompiler()
 	runAllTests(t, tests, config.WithCloseOnContextDone(true), true)
 }
 
