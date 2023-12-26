@@ -1661,7 +1661,7 @@ func atPath(fsc *sys.FSContext, mem api.Memory, fd int32, p, pathLen uint32) (ex
 
 	// interesting_paths wants to break on root paths or anything that escapes.
 	// This part is the same as fs.FS.Open()
-	if !fs.ValidPath(pathName) {
+	if !fsc.ValidPath(pathName) {
 		return nil, "", experimentalsys.EPERM
 	}
 

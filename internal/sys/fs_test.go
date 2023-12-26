@@ -58,7 +58,7 @@ func TestNewFSContext(t *testing.T) {
 			for _, root := range []string{"/", ""} {
 				t.Run(fmt.Sprintf("root = '%s'", root), func(t *testing.T) {
 					c := Context{}
-					err := c.InitFSContext(nil, nil, nil, []sys.FS{tc.fs}, []string{root}, nil)
+					err := c.InitFSContext(nil, nil, nil, []sys.FS{tc.fs}, []string{root}, false, nil)
 					require.NoError(t, err)
 					fsc := c.fsc
 					defer fsc.Close()
@@ -99,7 +99,7 @@ func TestFSContext_CloseFile(t *testing.T) {
 	testFS := &sysfs.AdaptFS{FS: embedFS}
 
 	c := Context{}
-	err = c.InitFSContext(nil, nil, nil, []sys.FS{testFS}, []string{"/"}, nil)
+	err = c.InitFSContext(nil, nil, nil, []sys.FS{testFS}, []string{"/"}, false, nil)
 	require.NoError(t, err)
 	fsc := c.fsc
 	defer fsc.Close()
@@ -129,9 +129,20 @@ func TestFSContext_CloseFile(t *testing.T) {
 	})
 }
 
+func TestNewFSContext_RawPaths(t *testing.T) {
+	tempdir := t.TempDir()
+	dirfs := sysfs.DirFS(tempdir)
+	c := Context{}
+	err := c.InitFSContext(nil, nil, nil, []sys.FS{dirfs}, []string{"/"}, true, nil)
+	require.NoError(t, err)
+	fsc := c.fsc
+	defer fsc.Close()
+	require.True(t, fsc.rawPaths)
+}
+
 func TestFSContext_noPreopens(t *testing.T) {
 	c := Context{}
-	err := c.InitFSContext(nil, nil, nil, nil, nil, nil)
+	err := c.InitFSContext(nil, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
 	testFS := &c.fsc
 	require.NoError(t, err)
@@ -157,7 +168,7 @@ func TestContext_Close(t *testing.T) {
 	testFS := &sysfs.AdaptFS{FS: testfs.FS{"foo": &testfs.File{}}}
 
 	c := Context{}
-	err := c.InitFSContext(nil, nil, nil, []sys.FS{testFS}, []string{"/"}, nil)
+	err := c.InitFSContext(nil, nil, nil, []sys.FS{testFS}, []string{"/"}, false, nil)
 	require.NoError(t, err)
 	fsc := c.fsc
 
@@ -184,7 +195,7 @@ func TestContext_Close_Error(t *testing.T) {
 	testFS := &sysfs.AdaptFS{FS: testfs.FS{"foo": file}}
 
 	c := Context{}
-	err := c.InitFSContext(nil, nil, nil, []sys.FS{testFS}, []string{"/"}, nil)
+	err := c.InitFSContext(nil, nil, nil, []sys.FS{testFS}, []string{"/"}, false, nil)
 	require.NoError(t, err)
 	fsc := c.fsc
 
@@ -208,7 +219,7 @@ func TestFSContext_Renumber(t *testing.T) {
 	require.EqualErrno(t, 0, errno)
 
 	c := Context{}
-	err := c.InitFSContext(nil, nil, nil, []sys.FS{dirFS}, []string{"/"}, nil)
+	err := c.InitFSContext(nil, nil, nil, []sys.FS{dirFS}, []string{"/"}, false, nil)
 	require.NoError(t, err)
 	fsc := c.fsc
 
@@ -252,7 +263,7 @@ func TestFSContext_Renumber(t *testing.T) {
 
 func TestDirentCache_Read(t *testing.T) {
 	c := Context{}
-	err := c.InitFSContext(nil, nil, nil, []sys.FS{&sysfs.AdaptFS{FS: fstest.FS}}, []string{"/"}, nil)
+	err := c.InitFSContext(nil, nil, nil, []sys.FS{&sysfs.AdaptFS{FS: fstest.FS}}, []string{"/"}, false, nil)
 	require.NoError(t, err)
 	fsc := c.fsc
 	defer fsc.Close()
@@ -430,7 +441,7 @@ func TestDirentCache_ReadNewFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	c := Context{}
-	err := c.InitFSContext(nil, nil, nil, []sys.FS{sysfs.DirFS(tmpDir)}, []string{"/"}, nil)
+	err := c.InitFSContext(nil, nil, nil, []sys.FS{sysfs.DirFS(tmpDir)}, []string{"/"}, false, nil)
 	require.NoError(t, err)
 	fsc := c.fsc
 	defer fsc.Close()

@@ -4,6 +4,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"unicode/utf8"
 
 	"github.com/wasilibs/wazerox/experimental/sys"
 	"github.com/wasilibs/wazerox/internal/descriptor"
@@ -258,6 +259,9 @@ type FSContext struct {
 	// (or directories) and defaults to empty.
 	// TODO: This is unguarded, so not goroutine-safe!
 	openedFiles FileTable
+
+	// whether to accept raw paths
+	rawPaths bool
 }
 
 // FileTable is a specialization of the descriptor.Table type used to map file
@@ -275,6 +279,19 @@ func (c *FSContext) RootFS() sys.FS {
 	} else {
 		return rootFS
 	}
+}
+
+// ValidPath returns whether the path is valid for this context.
+func (c *FSContext) ValidPath(path string) bool {
+	if !utf8.ValidString(path) {
+		return false
+	}
+
+	if c.rawPaths {
+		return true
+	}
+
+	return fs.ValidPath(path)
 }
 
 // LookupFile returns a file if it is in the table.
@@ -394,6 +411,7 @@ func (c *Context) InitFSContext(
 	stdin io.Reader,
 	stdout, stderr io.Writer,
 	fs []sys.FS, guestPaths []string,
+	rawPaths bool,
 	tcpListeners []*net.TCPListener,
 ) (err error) {
 	inFile, err := stdinFileEntry(stdin)
@@ -419,6 +437,9 @@ func (c *Context) InitFSContext(
 			// Default to bind to '/' when guestPath is effectively empty.
 			guestPath = "/"
 			c.fsc.rootFS = fs
+			// It's not possible for any other guest path to support raw paths
+			// so we only need to set it here
+			c.fsc.rawPaths = rawPaths
 		}
 		c.fsc.openedFiles.Insert(&FileEntry{
 			FS:        fs,

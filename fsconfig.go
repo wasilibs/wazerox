@@ -142,6 +142,8 @@ type fsConfig struct {
 	// guestPathToFS are the normalized paths to the currently configured
 	// filesystems, used for de-duplicating.
 	guestPathToFS map[string]int
+	// raw paths are accepted from the guest
+	rawPaths bool
 }
 
 // NewFSConfig returns a FSConfig that can be used for configuring module instantiation.
@@ -197,6 +199,13 @@ func (c *fsConfig) WithSysFSMount(fs experimentalsys.FS, guestPath string) FSCon
 		ret.fs = append(ret.fs, fs)
 		ret.guestPaths = append(ret.guestPaths, guestPath)
 	}
+	return ret
+}
+
+// WithRawPaths implements sysfs.FSConfig
+func (c *fsConfig) WithRawPaths() FSConfig {
+	ret := c.clone()
+	ret.rawPaths = true
 	return ret
 }
 
