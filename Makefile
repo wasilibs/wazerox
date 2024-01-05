@@ -123,7 +123,9 @@ spectest_v2_testdata_dir := $(spectest_v2_dir)/testdata
 spec_version_v2 := 1782235239ddebaf2cb079b00fdaa2d2c4dedba3
 spectest_threads_dir := $(spectest_base_dir)/threads
 spectest_threads_testdata_dir := $(spectest_threads_dir)/testdata
-spec_version_threads := cc01bf0d17ba3fb1dc59fb7c5c725838aff18b50
+# From https://github.com/WebAssembly/threads/tree/upstream-rebuild which has not been merged to main yet.
+# It will likely be renamed to main in the future - https://github.com/WebAssembly/threads/issues/216.
+spec_version_threads := 3635ca51a17e57e106988846c5b0e0cc48ac04fc
 
 .PHONY: build.spectest
 build.spectest:
@@ -174,9 +176,6 @@ build.spectest.threads:
 	@mkdir -p $(spectest_threads_testdata_dir)
 	@cd $(spectest_threads_testdata_dir) \
 		&& curl -sSL 'https://api.github.com/repos/WebAssembly/threads/contents/test/core?ref=$(spec_version_threads)' | jq -r '.[]| .download_url' | grep -E "atomic.wast" | xargs -Iurl curl -sJL url -O
-# Fix broken CAS spectests
-# https://github.com/WebAssembly/threads/issues/195#issuecomment-1318429506
-	@cd $(spectest_threads_testdata_dir) && patch < ../atomic.wast.patch
 	@cd $(spectest_threads_testdata_dir) && for f in `find . -name '*.wast'`; do \
 		wast2json --enable-threads --debug-names $$f; \
 	done
