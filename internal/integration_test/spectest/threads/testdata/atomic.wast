@@ -499,7 +499,6 @@
 (assert_trap (invoke "memory.atomic.notify" (i32.const 65536) (i32.const 0)) "out of bounds memory access")
 (assert_trap (invoke "memory.atomic.notify" (i32.const 65531) (i32.const 0)) "unaligned atomic")
 
-
 ;; unshared memory is OK
 (module
   (memory 1 1)
