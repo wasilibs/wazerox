@@ -344,37 +344,14 @@ func (m *MemoryInstance) writeUint64Le(offset uint32, v uint64) bool {
 	return true
 }
 
-// Wait32 suspends the caller until the offset is notified by a different agent.
-func (m *MemoryInstance) Wait32(offset uint32, exp uint32, timeout int64) uint64 {
-	w := m.getWaiters(offset)
-	w.mux.Lock()
-
-	addr := unsafe.Add(unsafe.Pointer(&m.Buffer[0]), offset)
-	cur := atomic.LoadUint32((*uint32)(addr))
+// Wait suspends the caller until the offset is notified by a different agent.
+func (m *MemoryInstance) Wait(offset uint32, cur uint64, exp uint64, timeout int64) uint64 {
 	if cur != exp {
-		w.mux.Unlock()
 		return 1
 	}
 
-	return m.wait(w, timeout)
-}
-
-// Wait64 suspends the caller until the offset is notified by a different agent.
-func (m *MemoryInstance) Wait64(offset uint32, exp uint64, timeout int64) uint64 {
 	w := m.getWaiters(offset)
 	w.mux.Lock()
-
-	addr := unsafe.Add(unsafe.Pointer(&m.Buffer[0]), offset)
-	cur := atomic.LoadUint64((*uint64)(addr))
-	if cur != exp {
-		w.mux.Unlock()
-		return 1
-	}
-
-	return m.wait(w, timeout)
-}
-
-func (m *MemoryInstance) wait(w *waiters, timeout int64) uint64 {
 	if w.l == nil {
 		w.l = list.New()
 	}

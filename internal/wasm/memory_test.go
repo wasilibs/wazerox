@@ -813,7 +813,7 @@ func TestMemoryInstance_WaitNotifyOnce(t *testing.T) {
 		// Reuse same offset 3 times to verify reuse
 		for i := 0; i < 3; i++ {
 			go func() {
-				res := mem.Wait32(0, 0, -1)
+				res := mem.Wait(0, 0, 0, -1)
 				propagateWaitResult(t, ch, res)
 			}()
 
@@ -830,11 +830,11 @@ func TestMemoryInstance_WaitNotifyOnce(t *testing.T) {
 
 		ch := make(chan string)
 		go func() {
-			res := mem.Wait32(0, 0, -1)
+			res := mem.Wait(0, 0, 0, -1)
 			propagateWaitResult(t, ch, res)
 		}()
 		go func() {
-			res := mem.Wait32(0, 0, -1)
+			res := mem.Wait(0, 0, 0, -1)
 			propagateWaitResult(t, ch, res)
 		}()
 
@@ -850,11 +850,11 @@ func TestMemoryInstance_WaitNotifyOnce(t *testing.T) {
 
 		ch := make(chan string)
 		go func() {
-			res := mem.Wait32(0, 0, -1)
+			res := mem.Wait(0, 0, 0, -1)
 			propagateWaitResult(t, ch, res)
 		}()
 		go func() {
-			res := mem.Wait32(0, 0, -1)
+			res := mem.Wait(0, 0, 0, -1)
 			propagateWaitResult(t, ch, res)
 		}()
 
@@ -871,11 +871,11 @@ func TestMemoryInstance_WaitNotifyOnce(t *testing.T) {
 
 		ch := make(chan string)
 		go func() {
-			res := mem.Wait32(0, 0, -1)
+			res := mem.Wait(0, 0, 0, -1)
 			propagateWaitResult(t, ch, res)
 		}()
 		go func() {
-			res := mem.Wait32(1, 268435456, -1)
+			res := mem.Wait(1, 268435456, 268435456, -1)
 			propagateWaitResult(t, ch, res)
 		}()
 
@@ -892,7 +892,7 @@ func TestMemoryInstance_WaitNotifyOnce(t *testing.T) {
 
 		ch := make(chan string)
 		go func() {
-			res := mem.Wait32(0, 0, 10 /* ns */)
+			res := mem.Wait(0, 0, 0, 10 /* ns */)
 			propagateWaitResult(t, ch, res)
 		}()
 

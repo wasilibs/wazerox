@@ -1190,8 +1190,9 @@ func (ce *callEngine) builtinFunctionMemoryWait32(mem *wasm.MemoryInstance) {
 	base := uintptr(unsafe.Pointer(&mem.Buffer[0]))
 
 	offset := uint32(addr - base)
+	cur := atomic.LoadUint32((*uint32)(unsafe.Pointer(addr)))
 
-	ce.pushValue(mem.Wait32(offset, exp, timeout))
+	ce.pushValue(mem.Wait(offset, uint64(cur), uint64(exp), timeout))
 }
 
 func (ce *callEngine) builtinFunctionMemoryWait64(mem *wasm.MemoryInstance) {
@@ -1205,8 +1206,9 @@ func (ce *callEngine) builtinFunctionMemoryWait64(mem *wasm.MemoryInstance) {
 	base := uintptr(unsafe.Pointer(&mem.Buffer[0]))
 
 	offset := uint32(addr - base)
+	cur := atomic.LoadUint64((*uint64)(unsafe.Pointer(addr)))
 
-	ce.pushValue(mem.Wait64(offset, exp, timeout))
+	ce.pushValue(mem.Wait(offset, cur, exp, timeout))
 }
 
 func (ce *callEngine) builtinFunctionMemoryNotify(mem *wasm.MemoryInstance) {

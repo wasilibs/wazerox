@@ -3971,21 +3971,30 @@ func (ce *callEngine) callNativeFunc(ctx context.Context, m *wasm.ModuleInstance
 			if !memoryInst.Shared {
 				panic(wasmruntime.ErrRuntimeExpectedSharedMemory)
 			}
-			if int(offset) >= len(memoryInst.Buffer) {
-				panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
-			}
 
 			switch wazeroir.UnsignedType(op.B1) {
 			case wazeroir.UnsignedTypeI32:
 				if offset%4 != 0 {
 					panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 				}
-				ce.pushValue(memoryInst.Wait32(offset, uint32(exp), timeout))
+				memoryInst.Mux.Lock()
+				cur, ok := memoryInst.ReadUint32Le(offset)
+				memoryInst.Mux.Unlock()
+				if !ok {
+					panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+				}
+				ce.pushValue(memoryInst.Wait(offset, uint64(cur), uint64(uint32(exp)), timeout))
 			case wazeroir.UnsignedTypeI64:
 				if offset%8 != 0 {
 					panic(wasmruntime.ErrRuntimeUnalignedAtomic)
 				}
-				ce.pushValue(memoryInst.Wait64(offset, exp, timeout))
+				memoryInst.Mux.Lock()
+				cur, ok := memoryInst.ReadUint64Le(offset)
+				memoryInst.Mux.Unlock()
+				if !ok {
+					panic(wasmruntime.ErrRuntimeOutOfBoundsMemoryAccess)
+				}
+				ce.pushValue(memoryInst.Wait(offset, cur, exp, timeout))
 			}
 			frame.pc++
 		case wazeroir.OperationKindAtomicMemoryNotify:
