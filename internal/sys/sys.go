@@ -114,7 +114,7 @@ func (c *Context) RandSource() io.Reader {
 //
 // Note: This is only used for testing.
 func DefaultContext(fs experimentalsys.FS) *Context {
-	if sysCtx, err := NewContext(0, nil, nil, nil, nil, nil, nil, nil, 0, nil, 0, nil, nil, []experimentalsys.FS{fs}, []string{""}, nil); err != nil {
+	if sysCtx, err := NewContext(0, nil, nil, nil, nil, nil, nil, nil, 0, nil, 0, nil, nil, []experimentalsys.FS{fs}, []string{""}, false, nil); err != nil {
 		panic(fmt.Errorf("BUG: DefaultContext should never error: %w", err))
 	} else {
 		return sysCtx
@@ -135,7 +135,7 @@ func NewContext(
 	nanotimeResolution sys.ClockResolution,
 	nanosleep sys.Nanosleep,
 	osyield sys.Osyield,
-	fs []experimentalsys.FS, guestPaths []string,
+	fs []experimentalsys.FS, guestPaths []string, rawPaths bool,
 	tcpListeners []*net.TCPListener,
 ) (sysCtx *Context, err error) {
 	sysCtx = &Context{args: args, environ: environ}
@@ -188,7 +188,7 @@ func NewContext(
 		sysCtx.osyield = platform.FakeOsyield
 	}
 
-	err = sysCtx.InitFSContext(stdin, stdout, stderr, fs, guestPaths, tcpListeners)
+	err = sysCtx.InitFSContext(stdin, stdout, stderr, fs, guestPaths, rawPaths, tcpListeners)
 
 	return
 }

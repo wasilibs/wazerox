@@ -13,4 +13,10 @@ type FSConfig interface {
 	//
 	// This is an alternative to WithFSMount, allowing more features.
 	WithSysFSMount(fs experimentalsys.FS, guestPath string) wazero.FSConfig
+
+	// WithRawPaths indicates the FS should accept raw paths from the
+	// guest. Currently, only WASIx is known to use absolute or uncleaned paths
+	// in FS calls. The experimentalsys.FS will need to be able to serve such
+	// paths. Default fs.FS implementations will not be able to.
+	WithRawPaths() wazero.FSConfig
 }

@@ -17,6 +17,7 @@ import (
 	wazero "github.com/wasilibs/wazerox"
 	"github.com/wasilibs/wazerox/api"
 	experimentalsys "github.com/wasilibs/wazerox/experimental/sys"
+	experimentalsysfs "github.com/wasilibs/wazerox/experimental/sysfs"
 	"github.com/wasilibs/wazerox/internal/fsapi"
 	"github.com/wasilibs/wazerox/internal/fstest"
 	"github.com/wasilibs/wazerox/internal/platform"
@@ -4200,6 +4201,77 @@ func Test_pathOpen_Errors(t *testing.T) {
 			expectedLog: `
 ==> wasi_snapshot_preview1.path_open(fd=3,dirflags=,path=file,oflags=CREAT|DIRECTORY,fs_rights_base=,fs_rights_inheriting=,fdflags=)
 <== (opened_fd=,errno=EINVAL)
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		tc := tt
+		t.Run(tc.name, func(t *testing.T) {
+			defer log.Reset()
+
+			mod.Memory().Write(tc.path, []byte(tc.pathName))
+
+			requireErrnoResult(t, tc.expectedErrno, mod, wasip1.PathOpenName, uint64(tc.fd), uint64(0), uint64(tc.path),
+				uint64(tc.pathLen), uint64(tc.oflags), 0, 0, 0, uint64(tc.resultOpenedFd))
+			require.Equal(t, tc.expectedLog, "\n"+log.String())
+		})
+	}
+}
+
+func Test_pathOpen_RawPaths(t *testing.T) {
+	tmpDir := t.TempDir() // open before loop to ensure no locking problems.
+	fsConfig := wazero.NewFSConfig().WithDirMount(tmpDir, "/")
+	fsConfig = fsConfig.(experimentalsysfs.FSConfig).WithRawPaths()
+
+	mod, r, log := requireProxyModule(t, wazero.NewModuleConfig().WithFSConfig(fsConfig))
+	defer r.Close(testCtx)
+
+	file := "file"
+	err := os.WriteFile(joinPath(tmpDir, file), []byte{}, 0o700)
+	require.NoError(t, err)
+
+	dir := "dir"
+	err = os.Mkdir(joinPath(tmpDir, dir), 0o700)
+	require.NoError(t, err)
+
+	nested := "dir/nested"
+	err = os.Mkdir(joinPath(tmpDir, nested), 0o700)
+	require.NoError(t, err)
+
+	nestedFile := "dir/nested/file"
+	err = os.WriteFile(joinPath(tmpDir, nestedFile), []byte{}, 0o700)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name, pathName                        string
+		fd                                    int32
+		path, pathLen, oflags, resultOpenedFd uint32
+		expectedErrno                         wasip1.Errno
+		expectedLog                           string
+	}{
+		{
+			name:          "rooted path",
+			fd:            sys.FdPreopen,
+			pathName:      "/" + file,
+			path:          0,
+			pathLen:       uint32(len(file)) + 1,
+			expectedErrno: wasip1.ErrnoSuccess,
+			expectedLog: `
+==> wasi_snapshot_preview1.path_open(fd=3,dirflags=,path=/file,oflags=,fs_rights_base=,fs_rights_inheriting=,fdflags=)
+<== (opened_fd=4,errno=ESUCCESS)
+`,
+		},
+		{
+			name:          "unclean path",
+			fd:            sys.FdPreopen,
+			pathName:      "foo/../" + file,
+			path:          0,
+			pathLen:       uint32(len(file)) + uint32(len("foo/../")),
+			expectedErrno: wasip1.ErrnoSuccess,
+			expectedLog: `
+==> wasi_snapshot_preview1.path_open(fd=3,dirflags=,path=foo/../file,oflags=,fs_rights_base=,fs_rights_inheriting=,fdflags=)
+<== (opened_fd=5,errno=ESUCCESS)
 `,
 		},
 	}

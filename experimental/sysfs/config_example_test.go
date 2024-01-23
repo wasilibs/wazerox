@@ -38,3 +38,12 @@ func ExampleReadFS() {
 	moduleConfig = wazero.NewModuleConfig().
 		WithFSConfig(wazero.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(readOnly, "/"))
 }
+
+// This example shows how to configure for use with raw paths.
+func ExampleFSConfig_WithRawPaths() {
+	root := sysfs.DirFS("/")
+	fsConfig := wazero.NewFSConfig()
+	fsConfig = fsConfig.(sysfs.FSConfig).WithSysFSMount(root, "/")
+	fsConfig = fsConfig.(sysfs.FSConfig).WithRawPaths()
+	moduleConfig = wazero.NewModuleConfig().WithFSConfig(fsConfig)
+}

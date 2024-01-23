@@ -854,8 +854,10 @@ func (c *moduleConfig) toSysContext() (sysCtx *internalsys.Context, err error) {
 
 	var fs []experimentalsys.FS
 	var guestPaths []string
+	var rawPaths bool
 	if f, ok := c.fsConfig.(*fsConfig); ok {
 		fs, guestPaths = f.preopens()
+		rawPaths = f.rawPaths
 	}
 
 	var listeners []*net.TCPListener
@@ -876,7 +878,7 @@ func (c *moduleConfig) toSysContext() (sysCtx *internalsys.Context, err error) {
 		c.walltime, c.walltimeResolution,
 		c.nanotime, c.nanotimeResolution,
 		c.nanosleep, c.osyield,
-		fs, guestPaths,
+		fs, guestPaths, rawPaths,
 		listeners,
 	)
 }
