@@ -1,3 +1,7 @@
+_This repository is inactive. All features have been merged upstream.
+It may return in the future if needing to experiment again,
+but there is no expectation or plan for this._
+
 # wazerox: wazero extended with bleeding-edge features and likely bugs
 
 [![WebAssembly Core Specification Test](https://github.com/wasilibs/wazerox/actions/workflows/spectest.yaml/badge.svg)](https://github.com/wasilibs/wazerox/actions/workflows/spectest.yaml) [![Go Reference](https://pkg.go.dev/badge/github.com/wasilibs/wazerox.svg)](https://pkg.go.dev/github.com/wasilibs/wazerox) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
